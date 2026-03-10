@@ -24,6 +24,11 @@ export default defineConfig(({ mode }) => {
     envDir: "../",
     resolve: {
       alias: [
+        // ── Fix: resolve "excalidraw-app/xxx" to local files ──
+        {
+          find: /^excalidraw-app\/(.*)/,
+          replacement: path.resolve(__dirname, "$1"),
+        },
         {
           find: /^@excalidraw\/common$/,
           replacement: path.resolve(
