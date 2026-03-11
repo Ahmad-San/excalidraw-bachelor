@@ -3,10 +3,9 @@
   "outputDirectory": "excalidraw-app/build",
   "installCommand": "yarn install",
   "rewrites": [
-    { "source": "/excalidraw/assets/:file", "destination": "/assets/:file" },
-    { "source": "/excalidraw/fonts/:file", "destination": "/fonts/:file" },
-    { "source": "/excalidraw/:file", "destination": "/:file" },
-    { "source": "/excalidraw", "destination": "/index.html" },
-    { "source": "/", "destination": "/index.html" }
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
   ]
 }
