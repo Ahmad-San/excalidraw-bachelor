@@ -1,5 +1,23 @@
 {
   "buildCommand": "yarn --cwd ./excalidraw-app build",
   "outputDirectory": "excalidraw-app/build",
-  "installCommand": "yarn install"
+  "installCommand": "yarn install",
+  "routes": [
+    { 
+      "src": "/excalidraw/assets/(.*)", 
+      "dest": "/excalidraw/assets/$1" 
+    },
+    { 
+      "src": "/excalidraw/(.*\\.(js|css|png|ico|webmanifest|map))", 
+      "dest": "/excalidraw/$1" 
+    },
+    { 
+      "src": "/excalidraw/(.*)", 
+      "dest": "/excalidraw/index.html" 
+    },
+    { 
+      "src": "/", 
+      "dest": "/excalidraw/index.html" 
+    }
+  ]
 }
