@@ -259,13 +259,8 @@
     };
 
     var markers = {
-      name: [],
-      time: [],
-      endTime: [],
-      phase: [],
-      category: [],
+      schema: { name: 0, time: 1, endTime: 2, phase: 3, category: 4, data: 5 },
       data: [],
-      length: 0,
     };
 
     var funcCache = {};
@@ -326,13 +321,14 @@
       samples.weight.push(node.durationMs || 0);
       samples.length++;
 
-      markers.name.push(internString(node.name));
-      markers.time.push(parseFloat(nodeStart.toFixed(3)));
-      markers.endTime.push(parseFloat(nodeEnd.toFixed(3)));
-      markers.phase.push(1);
-      markers.category.push(0);
-      markers.data.push({ type: 'Text', name: node.name });
-      markers.length++;
+      markers.data.push([
+        internString(node.name),
+        parseFloat(nodeStart.toFixed(3)),
+        parseFloat(nodeEnd.toFixed(3)),
+        1,
+        0,
+        null,
+      ]);
 
       var childOffset = nodeStart;
       (node.children || []).forEach(function (child) {
@@ -347,13 +343,15 @@
     });
 
     state.latencySamples.forEach(function (s) {
-      markers.name.push(internString('Input Latency: ' + s.ms + 'ms'));
-      markers.time.push(parseFloat(s.timeFromStart.toFixed(3)));
-      markers.endTime.push(parseFloat((s.timeFromStart + s.ms).toFixed(3)));
-      markers.phase.push(1);
-      markers.category.push(0);
-      markers.data.push({ type: 'Text', name: s.pointerType + ' → ' + s.ms + 'ms' });
-      markers.length++;
+      var timeFrom = (s.timeFromStart !== undefined) ? s.timeFromStart : (s.ms || 0);
+      markers.data.push([
+        internString('Input Latency: ' + s.ms + 'ms'),
+        parseFloat(timeFrom.toFixed(3)),
+        parseFloat((timeFrom + s.ms).toFixed(3)),
+        1,
+        0,
+        null,
+      ]);
     });
 
     var profileDuration = performance.now() - state.startTime;
@@ -430,6 +428,7 @@
       '<button id="__wp_stop__"    style="background:transparent;border:1px solid #a8ff78;color:#a8ff78;font-family:monospace;font-size:9px;padding:2px 6px;border-radius:3px;cursor:pointer;display:none">STOP</button>',
       '<button id="__wp_export__"  style="background:transparent;border:1px solid #2a2a3a;color:#888;font-family:monospace;font-size:9px;padding:2px 6px;border-radius:3px;cursor:pointer">CSV</button>',
       '<button id="__wp_firefox__" style="background:transparent;border:1px solid #ff9500;color:#ff9500;font-family:monospace;font-size:9px;padding:2px 6px;border-radius:3px;cursor:pointer">FFX</button>',
+      '<button id="__wp_open__"    style="background:transparent;border:1px solid #a855f7;color:#a855f7;font-family:monospace;font-size:9px;padding:2px 6px;border-radius:3px;cursor:pointer">OPEN</button>',
       '<button id="__wp_clear__"   style="background:transparent;border:1px solid #2a2a3a;color:#888;font-family:monospace;font-size:9px;padding:2px 6px;border-radius:3px;cursor:pointer">CLR</button>',
       '</div>',
       '</div>',
@@ -461,6 +460,7 @@
 
     el.querySelector('#__wp_export__').addEventListener('click', function (e) { e.stopPropagation(); WebProfiler.exportCSV(); });
     el.querySelector('#__wp_firefox__').addEventListener('click', function (e) { e.stopPropagation(); WebProfiler.exportFirefox(); });
+    el.querySelector('#__wp_open__').addEventListener('click', function (e) { e.stopPropagation(); WebProfiler.openInFirefoxProfiler(); });
     el.querySelector('#__wp_clear__').addEventListener('click', function (e) { e.stopPropagation(); WebProfiler.clear(); });
     el.querySelector('#__wp_stop__').addEventListener('click', function (e) {
       e.stopPropagation();
@@ -643,8 +643,8 @@
       var stack = trace.stacks[stackId];
       if (!stack) return [];
       var parent = resolveStack(stack.parentId);
-      var frame = trace.frames[stack.frameId];
-      var name = frame ? (frame.name || 'anonymous') : 'unknown';
+      var frame  = trace.frames[stack.frameId];
+      var name   = frame ? (frame.name || 'anonymous') : 'unknown';
       return parent.concat([name]);
     }
 
@@ -666,7 +666,7 @@
     // Convert each stroke into a call tree node
     return strokes.map(function (stroke, i) {
       var startMs = stroke.samples[0].timestamp;
-      var endMs = stroke.samples[stroke.samples.length - 1].timestamp;
+      var endMs   = stroke.samples[stroke.samples.length - 1].timestamp;
 
       // Count how often each function appears
       var funcCounts = {};
@@ -834,6 +834,58 @@
       a.href = URL.createObjectURL(blob);
       a.download = 'web_profiler_' + Date.now() + '.csv';
       a.click();
+    },
+
+    // ── Open directly in Firefox Profiler (no download needed) ─
+    // Opens profiler.firefox.com in a new tab and sends the profile
+    // via postMessage — works even on browsers that can't download files.
+    openInFirefoxProfiler: function () {
+      if (!state.callTrees.length && !state.latencySamples.length) {
+        console.warn('[WebProfiler] No data to open.');
+        return;
+      }
+      var profile = buildFirefoxProfile();
+      var origin = 'https://profiler.firefox.com';
+
+      // Must open at /from-post-message/ for postMessage injection to work
+      var profilerTab = window.open(origin + '/from-post-message/', '_blank');
+      if (!profilerTab) {
+        console.warn('[WebProfiler] Popup blocked. Please allow popups for this site.');
+        return;
+      }
+
+      // Wait for profiler to send 'ready:response', then inject profile
+      function onMessage(event) {
+        if (event.origin !== origin) return;
+        if (event.data && event.data.name === 'ready:response') {
+          window.removeEventListener('message', onMessage);
+          profilerTab.postMessage({ name: 'inject-profile', profile: profile }, origin);
+          if (state.options.logToConsole) {
+            console.log('[WebProfiler] Profile injected into profiler.firefox.com');
+          }
+        }
+      }
+
+      window.addEventListener('message', onMessage);
+
+      // Send ready:request to kick off the handshake
+      // (profiler may already be ready by the time we add the listener)
+      var attempts = 0;
+      var ping = setInterval(function () {
+        attempts++;
+        profilerTab.postMessage({ name: 'ready:request' }, origin);
+        if (attempts > 20) clearInterval(ping); // stop after 10 seconds
+      }, 500);
+
+      // Clean up ping once we get the response
+      var origOnMessage = onMessage;
+      window.addEventListener('message', function cleanup(event) {
+        if (event.origin !== origin) return;
+        if (event.data && event.data.name === 'ready:response') {
+          clearInterval(ping);
+          window.removeEventListener('message', cleanup);
+        }
+      });
     },
 
     exportFirefox: function () {
