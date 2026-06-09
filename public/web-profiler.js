@@ -27,34 +27,28 @@
   var state = {
     active: false,
     options: {},
-    startTime: performance.now(),  // profile start — needed for Firefox format
+    startTime: performance.now(),
 
-    // 1. latency
     latencySamples: [],
     pointerDownTime: 0,
     rafPending: false,
 
-    // 2. fps
     fps: 0,
     fpsFrames: 0,
     fpsLastTime: performance.now(),
     rafLoop: null,
 
-    // 3. canvas timing
     canvasTimings: {},
 
-    // 4. memory
     memorySamples: [],
     memoryInterval: null,
 
-    // 5. call tree
     callTrees: [],
     currentTree: null,
     isDrawing: false,
     strokeCanvasCalls: [],
   };
 
-  // ── Utilities ───────────────────────────────────────────────
   function avg(arr) {
     return arr.length ? Math.round(arr.reduce(function (a, b) { return a + b; }, 0) / arr.length) : null;
   }
@@ -71,7 +65,6 @@
   }
   function mb(bytes) { return (bytes / 1048576).toFixed(1); }
 
-  // ── 3. Canvas API Wrapping ──────────────────────────────────
   var CANVAS_METHODS = [
     'stroke', 'fill', 'beginPath', 'moveTo', 'lineTo',
     'bezierCurveTo', 'quadraticCurveTo', 'arc',
@@ -113,7 +106,6 @@
     return result;
   }
 
-  // ── 1. Input Latency ────────────────────────────────────────
   function onPointerDown(e) {
     if (state.options.stylusOnly && e.pointerType === 'mouse') return;
     state.pointerDownTime = performance.now();
@@ -187,7 +179,6 @@
     updateHUD();
   }
 
-  // ── 2. FPS ──────────────────────────────────────────────────
   function fpsTick() {
     state.fpsFrames++;
     var now = performance.now();
@@ -201,7 +192,6 @@
     state.rafLoop = requestAnimationFrame(fpsTick);
   }
 
-  // ── 4. Memory ───────────────────────────────────────────────
   function startMemorySampling() {
     if (!performance.memory) return;
     state.memoryInterval = setInterval(function () {
@@ -213,15 +203,7 @@
     }, 2000);
   }
 
-  // ── Firefox Profiler Export ──────────────────────────────────
-  // Converts call trees into the Gecko profile format accepted by
-  // profiler.firefox.com. Drag-and-drop the downloaded .json file there.
-  //
-  // Format references:
-  //   https://github.com/firefox-devtools/profiler/blob/main/docs-developer/gecko-profile-format.md
-  //   https://mostlynerdless.de/blog/2023/02/02/using-firefox-profiler-beyond-the-web/
   function buildFirefoxProfile() {
-    // String table — all function names are stored here, referenced by index
     var stringTable = [];
     var stringMap = {};
 
@@ -233,15 +215,12 @@
       return stringMap[s];
     }
 
-    // We build parallel arrays for the Firefox Profiler format:
-    // funcTable, frameTable, stackTable, samples
-
     var funcTable = {
-      name: [],          // index into stringTable
+      name: [],
       isJS: [],
       relevantForJS: [],
-      resource: [],      // -1 = unknown
-      address: [],       // -1 for JS functions (required by upgraders)
+      resource: [],
+      address: [],
       fileName: [],
       lineNumber: [],
       columnNumber: [],
@@ -253,27 +232,27 @@
       inlineDepth: [],
       category: [],
       subcategory: [],
-      func: [],           // index into funcTable
-      nativeSymbol: [],   // -1 = no native symbol (required by upgraders)
-      innerWindowID: [],  // 0 for all JS frames (required by upgraders)
-      implementation: [], // null = interpreter (required by upgraders)
+      func: [],
+      nativeSymbol: [],
+      innerWindowID: [],
+      implementation: [],
       line: [],
       column: [],
       length: 0,
     };
 
     var stackTable = {
-      frame: [],  // index into frameTable
+      frame: [],
       category: [],
       subcategory: [],
-      prefix: [],  // index into stackTable or null
+      prefix: [],
       length: 0,
     };
 
     var samples = {
-      stack: [],           // index into stackTable
-      time: [],            // ms since profile start
-      responsiveness: [],  // null per sample (required by upgraders)
+      stack: [],
+      time: [],
+      responsiveness: [],
       weight: [],
       weightType: 'tracing-ms',
       length: 0,
@@ -283,13 +262,12 @@
       name: [],
       time: [],
       endTime: [],
-      phase: [],  // 0=instant, 1=interval start, 2=interval end
+      phase: [],
       category: [],
       data: [],
       length: 0,
     };
 
-    // Cache: funcName → funcIndex
     var funcCache = {};
 
     function getOrCreateFunc(name) {
@@ -334,8 +312,6 @@
       return idx;
     }
 
-    // Convert a call tree node recursively into stack samples
-    // Each node becomes a "sample" at its timestamp with its full call path
     function processNode(node, parentStackIdx, timeOffset) {
       var funcIdx = getOrCreateFunc(node.name);
       var frameIdx = getOrCreateFrame(funcIdx);
@@ -344,23 +320,20 @@
       var nodeStart = timeOffset;
       var nodeEnd = timeOffset + (node.durationMs || 0);
 
-      // Add a sample at the start of this node
       samples.stack.push(stackIdx);
       samples.time.push(parseFloat(nodeStart.toFixed(3)));
       samples.responsiveness.push(null);
       samples.weight.push(node.durationMs || 0);
       samples.length++;
 
-      // Add a marker for this node (shows as interval in timeline)
       markers.name.push(internString(node.name));
       markers.time.push(parseFloat(nodeStart.toFixed(3)));
       markers.endTime.push(parseFloat(nodeEnd.toFixed(3)));
-      markers.phase.push(1); // interval
+      markers.phase.push(1);
       markers.category.push(0);
       markers.data.push({ type: 'Text', name: node.name });
       markers.length++;
 
-      // Process children
       var childOffset = nodeStart;
       (node.children || []).forEach(function (child) {
         processNode(child, stackIdx, childOffset);
@@ -368,13 +341,11 @@
       });
     }
 
-    // Process all call trees
     state.callTrees.forEach(function (tree) {
       var treeOffset = tree.startMs - state.startTime;
       processNode(tree, null, treeOffset);
     });
 
-    // Add latency markers (input events on timeline)
     state.latencySamples.forEach(function (s) {
       markers.name.push(internString('Input Latency: ' + s.ms + 'ms'));
       markers.time.push(parseFloat(s.timeFromStart.toFixed(3)));
@@ -395,6 +366,7 @@
         product: 'WebProfiler (Excalidraw / Tizen)',
         stackwalk: 0,
         version: 24,
+        preprocessedProfileVersion: 47,
         symbolicated: false,
         markerSchema: [],
         categories: [
@@ -423,18 +395,10 @@
           libs: [],
           funcTable: funcTable,
           resourceTable: {
-            lib: [],
-            name: [],
-            host: [],
-            type: [],
-            length: 0,
+            lib: [], name: [], host: [], type: [], length: 0,
           },
           nativeSymbols: {
-            libIndex: [],
-            address: [],
-            name: [],
-            functionSize: [],
-            length: 0,
+            libIndex: [], address: [], name: [], functionSize: [], length: 0,
           },
           stringArray: stringTable,
         },
@@ -442,7 +406,6 @@
     };
   }
 
-  // ── HUD ─────────────────────────────────────────────────────
   var hud = null;
 
   function createHUD() {
@@ -461,9 +424,10 @@
 
     el.innerHTML = [
       '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">',
-      '<span style="color:#00e5ff;font-weight:700;font-size:10px;letter-spacing:0.08em">⬡ WEB PROFILER</span>',
+      '<span id="__wp_title__" style="color:#00e5ff;font-weight:700;font-size:10px;letter-spacing:0.08em">⬡ WEB PROFILER [MANUAL]</span>',
       '<div style="display:flex;gap:5px">',
       '<button id="__wp_tree__"    style="background:transparent;border:1px solid #2a2a3a;color:#888;font-family:monospace;font-size:9px;padding:2px 6px;border-radius:3px;cursor:pointer">TREE</button>',
+      '<button id="__wp_stop__"    style="background:transparent;border:1px solid #a8ff78;color:#a8ff78;font-family:monospace;font-size:9px;padding:2px 6px;border-radius:3px;cursor:pointer;display:none">STOP</button>',
       '<button id="__wp_export__"  style="background:transparent;border:1px solid #2a2a3a;color:#888;font-family:monospace;font-size:9px;padding:2px 6px;border-radius:3px;cursor:pointer">CSV</button>',
       '<button id="__wp_firefox__" style="background:transparent;border:1px solid #ff9500;color:#ff9500;font-family:monospace;font-size:9px;padding:2px 6px;border-radius:3px;cursor:pointer">FFX</button>',
       '<button id="__wp_clear__"   style="background:transparent;border:1px solid #2a2a3a;color:#888;font-family:monospace;font-size:9px;padding:2px 6px;border-radius:3px;cursor:pointer">CLR</button>',
@@ -498,6 +462,12 @@
     el.querySelector('#__wp_export__').addEventListener('click', function (e) { e.stopPropagation(); WebProfiler.exportCSV(); });
     el.querySelector('#__wp_firefox__').addEventListener('click', function (e) { e.stopPropagation(); WebProfiler.exportFirefox(); });
     el.querySelector('#__wp_clear__').addEventListener('click', function (e) { e.stopPropagation(); WebProfiler.clear(); });
+    el.querySelector('#__wp_stop__').addEventListener('click', function (e) {
+      e.stopPropagation();
+      WebProfiler.stopNative().then(function () {
+        el.querySelector('#__wp_stop__').style.display = 'none';
+      });
+    });
     el.querySelector('#__wp_tree__').addEventListener('click', function (e) {
       e.stopPropagation();
       var panel = hud.querySelector('#__wp_tree_panel__');
@@ -594,7 +564,143 @@
     });
   }
 
-  // ── Public API ───────────────────────────────────────────────
+  // ── JS Self-Profiling API (Chrome 94+ / Edge 94+) ───────────
+  // If the browser supports the native Profiler API, we use it
+  // to capture REAL JS call stacks automatically — no manual wrapping.
+  // On old browsers (Tizen 5.2), it's not available so we fall back
+  // to our manual canvas wrapping approach.
+  //
+  // The native API requires:
+  //   Document-Policy: js-profiling
+  // header on the server response. Add this to vercel.json headers
+  // or your server config for it to work on modern browsers.
+
+  var nativeProfiler = null;   // holds the Profiler instance if available
+  var nativeTraceData = null;  // holds the trace after stop()
+
+  function isNativeProfilerAvailable() {
+    return typeof global.Profiler === 'function';
+  }
+
+  function startNativeProfiler() {
+    try {
+      nativeProfiler = new global.Profiler({
+        sampleInterval: 10,   // sample every 10ms
+        maxBufferSize: 10000, // max 10000 samples
+      });
+      if (state.options.logToConsole) {
+        console.log('[WebProfiler] JS Self-Profiling API available — using native profiler.');
+      }
+      updateHUDMode('native');
+    } catch (e) {
+      // NotAllowedError = missing Document-Policy header
+      // Fall through to manual mode
+      nativeProfiler = null;
+      if (state.options.logToConsole) {
+        console.log('[WebProfiler] JS Self-Profiling API not allowed (missing Document-Policy header). Using manual instrumentation.');
+      }
+    }
+  }
+
+  async function stopNativeProfiler() {
+    if (!nativeProfiler || nativeProfiler.stopped) return null;
+    try {
+      nativeTraceData = await nativeProfiler.stop();
+      if (state.options.logToConsole) {
+        console.log('[WebProfiler] Native profiler stopped.', nativeTraceData.samples.length, 'samples captured.');
+      }
+      return nativeTraceData;
+    } catch (e) {
+      console.warn('[WebProfiler] Failed to stop native profiler:', e);
+      return null;
+    }
+  }
+
+  function updateHUDMode(mode) {
+    if (!hud) return;
+    var titleEl = hud.querySelector('#__wp_title__');
+    var stopBtn = hud.querySelector('#__wp_stop__');
+    if (!titleEl) return;
+    if (mode === 'native') {
+      titleEl.textContent = '⬡ WEB PROFILER [NATIVE]';
+      titleEl.style.color = '#a8ff78';
+      if (stopBtn) stopBtn.style.display = 'inline-block';
+    } else {
+      titleEl.textContent = '⬡ WEB PROFILER [MANUAL]';
+      titleEl.style.color = '#00e5ff';
+      if (stopBtn) stopBtn.style.display = 'none';
+    }
+  }
+
+  // Convert native Profiler trace into our callTree format
+  // so it works with the existing Firefox export and HUD
+  function nativeTraceToCallTrees(trace) {
+    if (!trace || !trace.samples.length) return [];
+
+    // Build a map of stackId → full call path
+    function resolveStack(stackId) {
+      if (stackId === undefined || stackId === null) return [];
+      var stack = trace.stacks[stackId];
+      if (!stack) return [];
+      var parent = resolveStack(stack.parentId);
+      var frame = trace.frames[stack.frameId];
+      var name = frame ? (frame.name || 'anonymous') : 'unknown';
+      return parent.concat([name]);
+    }
+
+    // Group samples by time proximity into "strokes"
+    // (gap > 500ms = new stroke)
+    var strokes = [];
+    var currentStroke = null;
+    var GAP = 500;
+
+    trace.samples.forEach(function (sample) {
+      if (!currentStroke || (sample.timestamp - currentStroke.lastTime) > GAP) {
+        currentStroke = { samples: [], lastTime: sample.timestamp };
+        strokes.push(currentStroke);
+      }
+      currentStroke.samples.push(sample);
+      currentStroke.lastTime = sample.timestamp;
+    });
+
+    // Convert each stroke into a call tree node
+    return strokes.map(function (stroke, i) {
+      var startMs = stroke.samples[0].timestamp;
+      var endMs = stroke.samples[stroke.samples.length - 1].timestamp;
+
+      // Count how often each function appears
+      var funcCounts = {};
+      stroke.samples.forEach(function (sample) {
+        var path = resolveStack(sample.stackId);
+        path.forEach(function (name) {
+          funcCounts[name] = (funcCounts[name] || 0) + 1;
+        });
+      });
+
+      var children = Object.keys(funcCounts)
+        .sort(function (a, b) { return funcCounts[b] - funcCounts[a]; })
+        .slice(0, 10) // top 10 functions
+        .map(function (name) {
+          return {
+            name: name + ' (' + funcCounts[name] + ' samples)',
+            durationMs: funcCounts[name] * 10, // approx: samples × interval
+            children: [],
+          };
+        });
+
+      return {
+        name: 'stroke_native_' + (i + 1),
+        pointerType: 'pen',
+        startMs: startMs,
+        endMs: endMs,
+        durationMs: parseFloat((endMs - startMs).toFixed(3)),
+        latencyMs: null,
+        children: children,
+        source: 'native', // mark as native profiler data
+      };
+    });
+  }
+
   var WebProfiler = {
 
     init: function (options) {
@@ -602,21 +708,59 @@
       state.options = Object.assign({
         target: window, overlay: true, logToConsole: false,
         stylusOnly: false, wrapCanvas: true, trackMemory: true, onLatency: null,
+        useNativeProfiler: true, // try JS Self-Profiling API first
       }, options || {});
       state.startTime = performance.now();
       var target = state.options.target;
       target.addEventListener('pointerdown', onPointerDown, { capture: true, passive: true });
       target.addEventListener('pointerup', onPointerUp, { capture: true, passive: true });
       target.addEventListener('pointercancel', onPointerUp, { capture: true, passive: true });
+
+      // Try native profiler first, fall back to manual
+      if (state.options.useNativeProfiler && isNativeProfilerAvailable()) {
+        startNativeProfiler();
+      } else {
+        if (state.options.logToConsole) {
+          console.log('[WebProfiler] JS Self-Profiling API not available. Using manual instrumentation (canvas wrapping).');
+        }
+      }
+
+      // Always run manual instrumentation too
+      // (latency, FPS, memory work regardless)
       if (state.options.wrapCanvas) wrapCanvasAPI();
       if (state.options.trackMemory) startMemorySampling();
       state.fpsLastTime = performance.now();
       fpsTick();
       if (state.options.overlay) hud = createHUD();
       state.active = true;
-      if (state.options.logToConsole) console.log('[WebProfiler] initialized.');
+      if (state.options.logToConsole) console.log('[WebProfiler] initialized. Mode: ' + (nativeProfiler ? 'NATIVE' : 'MANUAL'));
       return this;
     },
+
+    // Stop the native profiler and merge its data into callTrees
+    stopNative: async function () {
+      if (!nativeProfiler) {
+        console.warn('[WebProfiler] Native profiler not running.');
+        return null;
+      }
+      var trace = await stopNativeProfiler();
+      if (trace) {
+        var trees = nativeTraceToCallTrees(trace);
+        state.callTrees = state.callTrees.concat(trees);
+        updateHUD();
+        if (state.options.logToConsole) {
+          console.log('[WebProfiler] Native trace merged:', trees.length, 'strokes.');
+        }
+      }
+      return trace;
+    },
+
+    // Check which mode is active
+    getMode: function () {
+      return nativeProfiler ? 'native' : 'manual';
+    },
+
+    isNativeAvailable: isNativeProfilerAvailable,
 
     destroy: function () {
       var target = state.options.target || window;
@@ -650,7 +794,6 @@
       };
     },
 
-    // ── Export: CSV ────────────────────────────────────────────
     exportCSV: function () {
       var sections = [];
       if (state.latencySamples.length) {
@@ -693,8 +836,6 @@
       a.click();
     },
 
-    // ── Export: Firefox Profiler JSON ──────────────────────────
-    // Downloads a .json file you can drag into profiler.firefox.com
     exportFirefox: function () {
       if (!state.callTrees.length && !state.latencySamples.length) {
         console.warn('[WebProfiler] No data to export.');
