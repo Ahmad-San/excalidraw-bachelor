@@ -2,21 +2,15 @@
   "buildCommand": "yarn --cwd ./excalidraw-app build",
   "outputDirectory": "excalidraw-app/build",
   "installCommand": "yarn install",
-  "rewrites": [
-    {
-      "source": "/(.*)",
-      "destination": "/index.html"
-    }
-  ],
   "headers": [
     {
       "source": "/(.*)",
       "headers": [
-        {
-          "key": "Document-Policy",
-          "value": "js-profiling"
-        }
+        { "key": "Document-Policy", "value": "js-profiling" }
       ]
     }
+  ],
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/index.html" }
   ]
 }

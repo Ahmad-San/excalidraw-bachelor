@@ -1,5 +1,7 @@
 import path from "path";
+import os from "os";
 import { defineConfig, loadEnv } from "vite";
+import type { Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import svgrPlugin from "vite-plugin-svgr";
 import { ViteEjsPlugin } from "vite-plugin-ejs";
@@ -8,6 +10,69 @@ import checker from "vite-plugin-checker";
 import { createHtmlPlugin } from "vite-plugin-html";
 import Sitemap from "vite-plugin-sitemap";
 import { woff2BrowserPlugin } from "../scripts/woff2/woff2-vite-plugins";
+
+// ── Local profile relay for QR export ───────────────────────────
+// Stores Firefox Profiler JSON blobs in memory.
+// POST /api/wp-profile  → { id, url }   (url is LAN-accessible)
+// GET  /api/wp-profile/:id → raw JSON with CORS headers
+function wpProfileStorePlugin(): Plugin {
+  const store = new Map<string, string>();
+
+  function getLanIP(): string {
+    for (const nets of Object.values(os.networkInterfaces())) {
+      for (const net of nets ?? []) {
+        if (net.family === "IPv4" && !net.internal) return net.address;
+      }
+    }
+    return "localhost";
+  }
+
+  return {
+    name: "wp-profile-store",
+    configureServer(server) {
+      server.middlewares.use("/api/wp-profile", (req, res, next) => {
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+        res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+        if (req.method === "OPTIONS") {
+          res.writeHead(204); res.end(); return;
+        }
+
+        if (req.method === "POST") {
+          let body = "";
+          req.on("data", (c: Buffer) => (body += c.toString()));
+          req.on("end", () => {
+            const id = Math.random().toString(36).slice(2, 10);
+            store.set(id, body);
+            const port = (server.config.server.port ?? 3000);
+            const url = `http://${getLanIP()}:${port}/api/wp-profile/${id}`;
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ id, url }));
+          });
+          return;
+        }
+
+        if (req.method === "GET") {
+          const id = (req.url ?? "").replace(/^\//, "");
+          const profile = store.get(id);
+          if (profile) {
+            res.writeHead(200, {
+              "Content-Type": "application/json",
+              "Access-Control-Allow-Origin": "*",
+            });
+            res.end(profile);
+          } else {
+            res.writeHead(404); res.end("Not found");
+          }
+          return;
+        }
+
+        next();
+      });
+    },
+  };
+}
 export default defineConfig(({ mode }) => {
   // To load .env variables
   const envVars = loadEnv(mode, `../`);
@@ -15,6 +80,7 @@ export default defineConfig(({ mode }) => {
   return {
     base: "/",
     server: {
+      host: true,   // bind to 0.0.0.0 so other devices on the LAN can reach it
       port: Number(envVars.VITE_APP_PORT || 3000),
       // open the browser
       open: true,
@@ -116,6 +182,7 @@ export default defineConfig(({ mode }) => {
       assetsInlineLimit: 0,
     },
     plugins: [
+      wpProfileStorePlugin(),
       Sitemap({
         hostname: "https://ahmad-san.github.io/excalidraw",
         outDir: "build",
