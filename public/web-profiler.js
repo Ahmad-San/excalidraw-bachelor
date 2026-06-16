@@ -1012,16 +1012,31 @@
         return;
       }
       var profile = buildFirefoxProfile();
-      var origin = 'https://profiler.firefox.com';
 
-      // Must open at /from-post-message/ for postMessage injection to work
+      // Trim profile to avoid OOM on constrained browsers (Tizen)
+      // Keep only last 500 samples and 200 markers
+      var thread = profile.threads[0];
+      var MAX_SAMPLES = 500;
+      var MAX_MARKERS = 200;
+      if (thread.samples.length > MAX_SAMPLES) {
+        thread.samples.stack         = thread.samples.stack.slice(-MAX_SAMPLES);
+        thread.samples.time          = thread.samples.time.slice(-MAX_SAMPLES);
+        thread.samples.responsiveness = thread.samples.responsiveness.slice(-MAX_SAMPLES);
+        thread.samples.weight        = thread.samples.weight.slice(-MAX_SAMPLES);
+        thread.samples.length        = MAX_SAMPLES;
+      }
+      if (thread.markers.data && thread.markers.data.length > MAX_MARKERS) {
+        thread.markers.data   = thread.markers.data.slice(-MAX_MARKERS);
+        thread.markers.length = MAX_MARKERS;
+      }
+
+      var origin = 'https://profiler.firefox.com';
       var profilerTab = window.open(origin + '/from-post-message/', '_blank');
       if (!profilerTab) {
         console.warn('[WebProfiler] Popup blocked. Please allow popups for this site.');
         return;
       }
 
-      // Wait for profiler to send 'ready:response', then inject profile
       function onMessage(event) {
         if (event.origin !== origin) return;
         if (event.data && event.data.name === 'ready:response') {
