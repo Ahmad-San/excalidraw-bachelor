@@ -1006,68 +1006,50 @@
     // ── Open directly in Firefox Profiler (no download needed) ─
     // Opens profiler.firefox.com in a new tab and sends the profile
     // via postMessage — works even on browsers that can't download files.
-    openInFirefoxProfiler: function () {
+    openInFirefoxProfiler: async function () {
       if (!state.callTrees.length && !state.latencySamples.length) {
         console.warn('[WebProfiler] No data to open.');
         return;
       }
+
+      var status = hud ? hud.querySelector('#__wp_status__') : null;
+      if (status) status.textContent = 'uploading profile…';
+
       var profile = buildFirefoxProfile();
+      var json = JSON.stringify(profile);
 
-      // Trim profile to avoid OOM on constrained browsers (Tizen)
-      // Keep only last 500 samples and 200 markers
-      var thread = profile.threads[0];
-      var MAX_SAMPLES = 500;
-      var MAX_MARKERS = 200;
-      if (thread.samples.length > MAX_SAMPLES) {
-        thread.samples.stack         = thread.samples.stack.slice(-MAX_SAMPLES);
-        thread.samples.time          = thread.samples.time.slice(-MAX_SAMPLES);
-        thread.samples.responsiveness = thread.samples.responsiveness.slice(-MAX_SAMPLES);
-        thread.samples.weight        = thread.samples.weight.slice(-MAX_SAMPLES);
-        thread.samples.length        = MAX_SAMPLES;
-      }
-      if (thread.markers.data && thread.markers.data.length > MAX_MARKERS) {
-        thread.markers.data   = thread.markers.data.slice(-MAX_MARKERS);
-        thread.markers.length = MAX_MARKERS;
-      }
+      try {
+        // Upload to jsonbin.io (free, no account needed for reading)
+        var res = await fetch('https://api.jsonbin.io/v3/b', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Bin-Private': 'false',  // public bin so Firefox Profiler can fetch it
+          },
+          body: json,
+        });
 
-      var origin = 'https://profiler.firefox.com';
-      var profilerTab = window.open(origin + '/from-post-message/', '_blank');
-      if (!profilerTab) {
-        console.warn('[WebProfiler] Popup blocked. Please allow popups for this site.');
-        return;
-      }
+        var data = await res.json();
+        var binId = data.metadata && data.metadata.id;
+        if (!binId) throw new Error('No bin ID returned');
 
-      function onMessage(event) {
-        if (event.origin !== origin) return;
-        if (event.data && event.data.name === 'ready:response') {
-          window.removeEventListener('message', onMessage);
-          profilerTab.postMessage({ name: 'inject-profile', profile: profile }, origin);
-          if (state.options.logToConsole) {
-            console.log('[WebProfiler] Profile injected into profiler.firefox.com');
-          }
+        // Direct URL to the raw JSON
+        var rawUrl = 'https://api.jsonbin.io/v3/b/' + binId + '/latest';
+
+        // Firefox Profiler can load from URL
+        var profilerUrl = 'https://profiler.firefox.com/from-url/' + encodeURIComponent(rawUrl);
+
+        if (status) status.textContent = 'opening profiler…';
+        window.open(profilerUrl, '_blank');
+
+        if (state.options.logToConsole) {
+          console.log('[WebProfiler] Profile uploaded. Opening:', profilerUrl);
         }
+
+      } catch(e) {
+        if (status) status.textContent = 'upload failed — try FFX button';
+        console.warn('[WebProfiler] Upload failed:', e.message);
       }
-
-      window.addEventListener('message', onMessage);
-
-      // Send ready:request to kick off the handshake
-      // (profiler may already be ready by the time we add the listener)
-      var attempts = 0;
-      var ping = setInterval(function () {
-        attempts++;
-        profilerTab.postMessage({ name: 'ready:request' }, origin);
-        if (attempts > 20) clearInterval(ping); // stop after 10 seconds
-      }, 500);
-
-      // Clean up ping once we get the response
-      var origOnMessage = onMessage;
-      window.addEventListener('message', function cleanup(event) {
-        if (event.origin !== origin) return;
-        if (event.data && event.data.name === 'ready:response') {
-          clearInterval(ping);
-          window.removeEventListener('message', cleanup);
-        }
-      });
     },
 
     exportFirefox: function () {
