@@ -46,7 +46,7 @@
     callTrees: [],
     currentTree: null,
     isDrawing: false,
-    strokeCanvasCalls: [],
+    interactionCanvasCalls: [],
   };
 
   function avg(arr) {
@@ -84,7 +84,7 @@
         state.canvasTimings[method].push(elapsed);
         if (state.canvasTimings[method].length > 200) state.canvasTimings[method].shift();
         if (state.isDrawing && state.currentTree) {
-          state.strokeCanvasCalls.push({ name: method, durationMs: elapsed });
+          state.interactionCanvasCalls.push({ name: method, durationMs: elapsed });
         }
         return result;
       };
@@ -110,9 +110,9 @@
     if (state.options.stylusOnly && e.pointerType === 'mouse') return;
     state.pointerDownTime = performance.now();
     state.isDrawing = true;
-    state.strokeCanvasCalls = [];
+    state.interactionCanvasCalls = [];
     state.currentTree = {
-      name: 'stroke_' + (state.callTrees.length + 1),
+      name: 'interaction_' + (state.callTrees.length + 1),
       pointerType: e.pointerType,
       startMs: state.pointerDownTime,
       endMs: null,
@@ -156,16 +156,16 @@
     var now = performance.now();
     state.currentTree.endMs = now;
     state.currentTree.durationMs = parseFloat((now - state.currentTree.startMs).toFixed(3));
-    if (state.strokeCanvasCalls.length) {
+    if (state.interactionCanvasCalls.length) {
       var grouped = {};
-      state.strokeCanvasCalls.forEach(function (c) {
+      state.interactionCanvasCalls.forEach(function (c) {
         if (!grouped[c.name]) grouped[c.name] = { name: c.name, calls: 0, totalMs: 0 };
         grouped[c.name].calls++;
         grouped[c.name].totalMs += c.durationMs;
       });
       state.currentTree.children.push({
-        name: 'pointermove → canvas (' + state.strokeCanvasCalls.length + ' calls)',
-        durationMs: parseFloat(state.strokeCanvasCalls.reduce(function (a, b) { return a + b.durationMs; }, 0).toFixed(3)),
+        name: 'pointermove → canvas (' + state.interactionCanvasCalls.length + ' calls)',
+        durationMs: parseFloat(state.interactionCanvasCalls.reduce(function (a, b) { return a + b.durationMs; }, 0).toFixed(3)),
         children: Object.keys(grouped).map(function (k) {
           var g = grouped[k];
           return { name: k + ' ×' + g.calls, durationMs: parseFloat(g.totalMs.toFixed(3)), children: [] };
@@ -175,7 +175,7 @@
     state.callTrees.push(state.currentTree);
     if (state.callTrees.length > 50) state.callTrees.shift();
     state.currentTree = null;
-    state.strokeCanvasCalls = [];
+    state.interactionCanvasCalls = [];
     updateHUD();
   }
 
@@ -444,10 +444,10 @@
       '</div>',
       '<div style="color:#555570;font-size:9px;margin-bottom:4px">CANVAS CALLS (avg ms)</div>',
       '<div id="__wp_canvas__" style="display:flex;flex-direction:column;gap:3px;margin-bottom:10px"></div>',
-      '<div style="color:#555570;font-size:9px;margin-bottom:4px">LAST 8 STROKES</div>',
+      '<div style="color:#555570;font-size:9px;margin-bottom:4px">LAST 8 INTERACTIONS</div>',
       '<div id="__wp_bars__" style="display:flex;align-items:flex-end;gap:3px;height:24px;margin-bottom:8px"></div>',
       '<div id="__wp_tree_panel__" style="display:none;margin-top:8px;border-top:1px solid #2a2a3a;padding-top:8px">',
-      '<div style="color:#555570;font-size:9px;margin-bottom:4px">LAST STROKE PIPELINE</div>',
+      '<div style="color:#555570;font-size:9px;margin-bottom:4px">LAST INTERACTION PIPELINE</div>',
       '<div id="__wp_tree_content__" style="font-size:9px;line-height:1.9;color:#888;max-height:180px;overflow-y:auto;white-space:nowrap"></div>',
       '</div>',
       '<div style="display:flex;align-items:center;gap:6px;margin-top:6px">',
@@ -484,7 +484,7 @@
     var content = hud.querySelector('#__wp_tree_content__');
     if (!content) return;
     if (!state.callTrees.length) {
-      content.innerHTML = '<span style="color:#555570">draw a stroke first</span>';
+      content.innerHTML = '<span style="color:#555570">no interactions yet</span>';
       return;
     }
     var tree = state.callTrees[state.callTrees.length - 1];
@@ -648,29 +648,29 @@
       return parent.concat([name]);
     }
 
-    // Group samples by time proximity into "strokes"
-    // (gap > 500ms = new stroke)
-    var strokes = [];
-    var currentStroke = null;
+    // Group samples by time proximity into "interactions"
+    // (gap > 500ms = new interaction)
+    var interactions = [];
+    var currentInteraction = null;
     var GAP = 500;
 
     trace.samples.forEach(function (sample) {
-      if (!currentStroke || (sample.timestamp - currentStroke.lastTime) > GAP) {
-        currentStroke = { samples: [], lastTime: sample.timestamp };
-        strokes.push(currentStroke);
+      if (!currentInteraction || (sample.timestamp - currentInteraction.lastTime) > GAP) {
+        currentInteraction = { samples: [], lastTime: sample.timestamp };
+        interactions.push(currentInteraction);
       }
-      currentStroke.samples.push(sample);
-      currentStroke.lastTime = sample.timestamp;
+      currentInteraction.samples.push(sample);
+      currentInteraction.lastTime = sample.timestamp;
     });
 
-    // Convert each stroke into a call tree node
-    return strokes.map(function (stroke, i) {
-      var startMs = stroke.samples[0].timestamp;
-      var endMs   = stroke.samples[stroke.samples.length - 1].timestamp;
+    // Convert each interaction into a call tree node
+    return interactions.map(function (interaction, i) {
+      var startMs = interaction.samples[0].timestamp;
+      var endMs   = interaction.samples[interaction.samples.length - 1].timestamp;
 
       // Count how often each function appears
       var funcCounts = {};
-      stroke.samples.forEach(function (sample) {
+      interaction.samples.forEach(function (sample) {
         var path = resolveStack(sample.stackId);
         path.forEach(function (name) {
           funcCounts[name] = (funcCounts[name] || 0) + 1;
@@ -689,7 +689,7 @@
         });
 
       return {
-        name: 'stroke_native_' + (i + 1),
+        name: 'interaction_native_' + (i + 1),
         pointerType: 'pen',
         startMs: startMs,
         endMs: endMs,
@@ -751,7 +751,7 @@
         state.callTrees = state.callTrees.concat(trees);
         updateHUD();
         if (state.options.logToConsole) {
-          console.log('[WebProfiler] Native trace merged:', trees.length, 'strokes.');
+          console.log('[WebProfiler] Native trace merged:', trees.length, 'interactions.');
         }
       }
       return trace;
@@ -815,7 +815,7 @@
       }
       if (state.callTrees.length) {
         sections.push('=== CALL TREES ===');
-        sections.push('stroke,depth,node,duration_ms,pointer_type');
+        sections.push('interaction,depth,node,duration_ms,pointer_type');
         state.callTrees.forEach(function (tree, ti) {
           function exportNode(node, depth) {
             sections.push((ti + 1) + ',' + depth + ',' + node.name + ',' + (node.durationMs || 0) + ',' + (tree.pointerType || 'unknown'));
@@ -907,7 +907,7 @@
 
     clear: function () {
       state.latencySamples = []; state.memorySamples = []; state.callTrees = [];
-      state.currentTree = null; state.strokeCanvasCalls = []; state.isDrawing = false;
+      state.currentTree = null; state.interactionCanvasCalls = []; state.isDrawing = false;
       Object.keys(state.canvasTimings).forEach(function (k) { state.canvasTimings[k] = []; });
       state.startTime = performance.now();
       if (hud) {
