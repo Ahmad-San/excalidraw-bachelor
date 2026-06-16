@@ -1013,37 +1013,43 @@
       }
 
       var status = hud ? hud.querySelector('#__wp_status__') : null;
-      if (status) status.textContent = 'uploading profile…';
+      if (status) status.textContent = 'uploading to Firefox Profiler…';
 
       var profile = buildFirefoxProfile();
       var json = JSON.stringify(profile);
-      var blob = new Blob([json], { type: 'application/json' });
 
       try {
-        // 0x0.st — free file host, no auth, returns plain URL
-        var form = new FormData();
-        form.append('file', blob, 'profile.json');
-
-        var res = await fetch('https://0x0.st', {
+        // Use Firefox Profiler's official upload API — no hosting needed!
+        // https://github.com/firefox-devtools/profiler/blob/main/docs-developer/loading-in-profiles.md
+        var res = await fetch('https://api.profiler.firefox.com/compressed-store', {
           method: 'POST',
-          body: form,
+          headers: {
+            'Accept': 'application/vnd.firefox-profiler+json;version=1.0',
+            'Content-Type': 'application/json',
+          },
+          body: json,
         });
 
-        var rawUrl = (await res.text()).trim();
-        if (!rawUrl.startsWith('http')) throw new Error('Invalid URL: ' + rawUrl);
+        if (!res.ok) throw new Error('Upload failed: ' + res.status);
 
-        var profilerUrl = 'https://profiler.firefox.com/from-url/' + encodeURIComponent(rawUrl);
+        // Response is a JWT — decode base64 payload to get profileToken
+        var jwt = await res.text();
+        var payload = JSON.parse(atob(jwt.trim().split('.')[1]));
+        var profileToken = payload.profileToken;
+        if (!profileToken) throw new Error('No profile token in response');
+
+        var profilerUrl = 'https://profiler.firefox.com/public/' + profileToken;
 
         if (status) status.textContent = 'opening profiler…';
         window.open(profilerUrl, '_blank');
 
         if (state.options.logToConsole) {
-          console.log('[WebProfiler] Profile at:', rawUrl);
-          console.log('[WebProfiler] Opening:', profilerUrl);
+          console.log('[WebProfiler] Profile token:', profileToken);
+          console.log('[WebProfiler] URL:', profilerUrl);
         }
 
       } catch(e) {
-        if (status) status.textContent = 'upload failed — use FFX button';
+        if (status) status.textContent = 'failed — use FFX button';
         console.warn('[WebProfiler] Upload failed:', e.message);
       }
     },
