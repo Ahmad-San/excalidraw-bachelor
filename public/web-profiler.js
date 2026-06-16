@@ -632,33 +632,56 @@
     }
   }
 
-  // ── Source Map Resolution via stacktrace-gps ────────────────
+  // ── Source Map Resolution via source-map-js ─────────────────
+  // Pure JS port of Mozilla's source-map library — no WASM needed.
   // Resolves minified names like 'BO', 'ur' → real names like
   // 'renderScene', 'updateElements' using the .map files from build.
   // Loaded dynamically from CDN — only when native profiler is used.
 
-  var gps = null; // stacktrace-gps instance
+  var sourceMapLib = null;          // source-map-js module
+  var sourceMapCache = {};          // cache of fetched .map files per script URL
 
-  function loadStacktraceGPS() {
+  function loadSourceMapJS() {
     return new Promise(function(resolve, reject) {
-      if (gps) { resolve(gps); return; }
-      // Load stackframe first (dependency of stacktrace-gps)
-      var s1 = document.createElement('script');
-      s1.src = 'https://cdn.jsdelivr.net/npm/stackframe@1.3.4/stackframe.min.js';
-      s1.onload = function() {
-        var s2 = document.createElement('script');
-        s2.src = 'https://cdn.jsdelivr.net/npm/stacktrace-gps@3.1.2/dist/stacktrace-gps.min.js';
-        s2.onload = function() {
-          gps = new global.StackTraceGPS();
-          if (state.options.logToConsole) console.log('[WebProfiler] stacktrace-gps loaded.');
-          resolve(gps);
-        };
-        s2.onerror = reject;
-        document.head.appendChild(s2);
+      if (sourceMapLib) { resolve(sourceMapLib); return; }
+      var s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/source-map-js@1.2.1/source-map.min.js';
+      s.onload = function() {
+        // source-map-js exposes itself as window.sourceMap
+        sourceMapLib = global.sourceMap;
+        if (state.options.logToConsole) console.log('[WebProfiler] source-map-js loaded.');
+        resolve(sourceMapLib);
       };
-      s1.onerror = reject;
-      document.head.appendChild(s1);
+      s.onerror = reject;
+      document.head.appendChild(s);
     });
+  }
+
+  // Fetch a .map file for a given script URL
+  // e.g. https://example.com/assets/index-abc123.js
+  //   →  https://example.com/assets/index-abc123.js.map
+  async function fetchSourceMap(scriptUrl) {
+    if (sourceMapCache[scriptUrl]) return sourceMapCache[scriptUrl];
+    try {
+      // First try to get the sourceMappingURL from the JS file itself
+      var jsRes = await fetch(scriptUrl);
+      var jsText = await jsRes.text();
+      var match = jsText.match(/\/\/# sourceMappingURL=(.+)$/m);
+      if (!match) return null;
+
+      var mapUrl = match[1].startsWith('http')
+        ? match[1]
+        : new URL(match[1], scriptUrl).href;
+
+      var mapRes = await fetch(mapUrl);
+      var mapJson = await mapRes.json();
+      sourceMapCache[scriptUrl] = mapJson;
+      if (state.options.logToConsole) console.log('[WebProfiler] Loaded source map:', mapUrl);
+      return mapJson;
+    } catch(e) {
+      if (state.options.logToConsole) console.warn('[WebProfiler] Could not fetch source map for:', scriptUrl, e);
+      return null;
+    }
   }
 
   // Resolve all unique frame names in a trace using source maps
@@ -668,46 +691,53 @@
     if (!trace || !trace.frames) return resolved;
 
     try {
-      var g = await loadStacktraceGPS();
-
-      // Get unique frames that have location info
-      var frames = trace.frames.filter(function(f) {
-        return f && f.name && f.line !== undefined && f.column !== undefined;
-      });
+      var lib = await loadSourceMapJS();
 
       // Build script URL map from resourceId
       var scripts = {};
       if (trace.resources) {
-        trace.resources.forEach(function(url, i) {
-          scripts[i] = url;
-        });
+        trace.resources.forEach(function(url, i) { scripts[i] = url; });
       }
 
-      // Resolve each frame in parallel
-      var promises = frames.map(function(frame) {
-        var scriptUrl = scripts[frame.resourceId] || '';
-        if (!scriptUrl) {
-          resolved[frame.name] = frame.name; // can't resolve without URL
-          return Promise.resolve();
-        }
-        var sf = new global.StackFrame({
-          functionName: frame.name,
-          fileName: scriptUrl,
-          lineNumber: frame.line,
-          columnNumber: frame.column,
-        });
-        return g.pinpoint(sf).then(function(newFrame) {
-          var realName = newFrame.functionName || frame.name;
-          resolved[frame.name] = realName;
-          if (state.options.logToConsole && realName !== frame.name) {
-            console.log('[WebProfiler] Resolved: ' + frame.name + ' → ' + realName);
-          }
-        }).catch(function() {
-          resolved[frame.name] = frame.name; // keep original on error
-        });
+      // Group frames by script URL to batch fetch source maps
+      var byScript = {};
+      trace.frames.forEach(function(frame, i) {
+        if (!frame || frame.line === undefined || frame.column === undefined) return;
+        var url = scripts[frame.resourceId] || '';
+        if (!url) return;
+        if (!byScript[url]) byScript[url] = [];
+        byScript[url].push({ frame: frame, idx: i });
       });
 
-      await Promise.all(promises);
+      // Process each script's frames using its source map
+      await Promise.all(Object.keys(byScript).map(async function(scriptUrl) {
+        var mapJson = await fetchSourceMap(scriptUrl);
+        if (!mapJson) return;
+
+        var consumer = new lib.SourceMapConsumer(mapJson);
+
+        byScript[scriptUrl].forEach(function(item) {
+          var frame = item.frame;
+          var original = consumer.originalPositionFor({
+            line:   frame.line,
+            column: frame.column,
+          });
+
+          // Use original name if found, otherwise keep minified
+          var realName = original.name || frame.name;
+          if (realName && realName !== frame.name) {
+            resolved[frame.name] = realName;
+            if (state.options.logToConsole) {
+              console.log('[WebProfiler] Resolved: ' + frame.name + ' → ' + realName);
+            }
+          } else {
+            resolved[frame.name] = frame.name;
+          }
+        });
+
+        consumer.destroy();
+      }));
+
     } catch(e) {
       if (state.options.logToConsole) console.warn('[WebProfiler] Source map resolution failed:', e);
     }
