@@ -632,114 +632,155 @@
     }
   }
 
-  // ── Source Map Resolution via source-map-js ─────────────────
-  // Pure JS port of Mozilla's source-map library — no WASM needed.
-  // Resolves minified names like 'BO', 'ur' → real names like
-  // 'renderScene', 'updateElements' using the .map files from build.
-  // Loaded dynamically from CDN — only when native profiler is used.
+  // ── Source Map Resolution (built-in, no dependencies) ────────
+  // Implements a minimal VLQ source map decoder directly — no CDN,
+  // no WASM, no external dependencies. Works everywhere including
+  // Tizen 5.2 and Edge with tracking prevention enabled.
 
-  var sourceMapLib = null;          // source-map-js module
-  var sourceMapCache = {};          // cache of fetched .map files per script URL
+  var sourceMapCache = {}; // cache of parsed consumers per script URL
 
-  function loadSourceMapJS() {
-    return new Promise(function(resolve, reject) {
-      if (sourceMapLib) { resolve(sourceMapLib); return; }
-      var s = document.createElement('script');
-      s.src = 'https://cdn.jsdelivr.net/npm/source-map-js@1.2.1/source-map.min.js';
-      s.onload = function() {
-        // source-map-js exposes itself as window.sourceMap
-        sourceMapLib = global.sourceMap;
-        if (state.options.logToConsole) console.log('[WebProfiler] source-map-js loaded.');
-        resolve(sourceMapLib);
-      };
-      s.onerror = reject;
-      document.head.appendChild(s);
-    });
+  // Base64 VLQ decoder — implements the source map spec
+  var B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  var B64_MAP = {};
+  for (var _i = 0; _i < B64.length; _i++) B64_MAP[B64[_i]] = _i;
+
+  function decodeVLQ(str, pos) {
+    var result = 0, shift = 0, digit, cont;
+    do {
+      digit = B64_MAP[str[pos++]];
+      cont  = digit & 32;
+      digit &= 31;
+      result += digit << shift;
+      shift  += 5;
+    } while (cont);
+    return { value: (result & 1) ? -(result >> 1) : (result >> 1), pos: pos };
   }
 
-  // Fetch a .map file for a given script URL
-  // e.g. https://example.com/assets/index-abc123.js
-  //   →  https://example.com/assets/index-abc123.js.map
-  async function fetchSourceMap(scriptUrl) {
+  // Parse a source map JSON into a lookup structure
+  // Returns a function: (line, column) → { name, source }
+  function parseSourceMap(mapJson) {
+    var names   = mapJson.names   || [];
+    var sources = mapJson.sources || [];
+    var mappings = mapJson.mappings || '';
+
+    // Parse all mappings into a sorted array
+    var segments = [];
+    var genLine = 0;
+    var srcFile = 0, srcLine = 0, srcCol = 0, nameIdx = 0;
+
+    var lines = mappings.split(';');
+    for (var li = 0; li < lines.length; li++) {
+      genLine = li;
+      var genCol = 0;
+      var parts = lines[li].split(',');
+      for (var pi = 0; pi < parts.length; pi++) {
+        var seg = parts[pi];
+        if (!seg) continue;
+        var pos = 0;
+        var r;
+
+        r = decodeVLQ(seg, pos); genCol  += r.value; pos = r.pos;
+        if (pos >= seg.length) continue;
+        r = decodeVLQ(seg, pos); srcFile += r.value; pos = r.pos;
+        if (pos >= seg.length) continue;
+        r = decodeVLQ(seg, pos); srcLine += r.value; pos = r.pos;
+        if (pos >= seg.length) continue;
+        r = decodeVLQ(seg, pos); srcCol  += r.value; pos = r.pos;
+
+        var nameIndex = -1;
+        if (pos < seg.length) {
+          r = decodeVLQ(seg, pos); nameIdx += r.value;
+          nameIndex = nameIdx;
+        }
+
+        segments.push({
+          gl: genLine, gc: genCol,
+          name: nameIndex >= 0 ? names[nameIndex] : null,
+          source: sources[srcFile] || null,
+        });
+      }
+    }
+
+    // Lookup: find closest segment for a given generated line/column
+    return function lookup(line, column) {
+      // line is 1-based in profiler, 0-based in source map
+      var targetLine = line - 1;
+      var best = null;
+      for (var i = 0; i < segments.length; i++) {
+        var s = segments[i];
+        if (s.gl === targetLine && s.gc <= column) {
+          if (!best || s.gc > best.gc) best = s;
+        }
+      }
+      return best;
+    };
+  }
+
+  // Fetch and parse a source map for a script URL
+  async function getSourceMapLookup(scriptUrl) {
     if (sourceMapCache[scriptUrl]) return sourceMapCache[scriptUrl];
     try {
-      // First try to get the sourceMappingURL from the JS file itself
-      var jsRes = await fetch(scriptUrl);
+      var jsRes  = await fetch(scriptUrl);
       var jsText = await jsRes.text();
-      var match = jsText.match(/\/\/# sourceMappingURL=(.+)$/m);
+      var match  = jsText.match(/\/\/# sourceMappingURL=(.+)$/m);
       if (!match) return null;
 
       var mapUrl = match[1].startsWith('http')
         ? match[1]
         : new URL(match[1], scriptUrl).href;
 
-      var mapRes = await fetch(mapUrl);
+      var mapRes  = await fetch(mapUrl);
       var mapJson = await mapRes.json();
-      sourceMapCache[scriptUrl] = mapJson;
-      if (state.options.logToConsole) console.log('[WebProfiler] Loaded source map:', mapUrl);
-      return mapJson;
+      var lookup  = parseSourceMap(mapJson);
+      sourceMapCache[scriptUrl] = lookup;
+      if (state.options.logToConsole) console.log('[WebProfiler] Source map parsed:', mapUrl);
+      return lookup;
     } catch(e) {
-      if (state.options.logToConsole) console.warn('[WebProfiler] Could not fetch source map for:', scriptUrl, e);
+      if (state.options.logToConsole) console.warn('[WebProfiler] Source map fetch failed:', scriptUrl, e.message);
       return null;
     }
   }
 
-  // Resolve all unique frame names in a trace using source maps
-  // Returns a map of { minifiedName → resolvedName }
+  // Resolve all frame names in a native profiler trace
+  // Returns { minifiedName → realName }
   async function resolveFrameNames(trace) {
     var resolved = {};
     if (!trace || !trace.frames) return resolved;
 
     try {
-      var lib = await loadSourceMapJS();
-
       // Build script URL map from resourceId
       var scripts = {};
       if (trace.resources) {
         trace.resources.forEach(function(url, i) { scripts[i] = url; });
       }
 
-      // Group frames by script URL to batch fetch source maps
+      // Group frames by script
       var byScript = {};
-      trace.frames.forEach(function(frame, i) {
+      trace.frames.forEach(function(frame) {
         if (!frame || frame.line === undefined || frame.column === undefined) return;
-        var url = scripts[frame.resourceId] || '';
+        var url = scripts[frame.resourceId];
         if (!url) return;
         if (!byScript[url]) byScript[url] = [];
-        byScript[url].push({ frame: frame, idx: i });
+        byScript[url].push(frame);
       });
 
-      // Process each script's frames using its source map
+      // Resolve each script's frames
       await Promise.all(Object.keys(byScript).map(async function(scriptUrl) {
-        var mapJson = await fetchSourceMap(scriptUrl);
-        if (!mapJson) return;
+        var lookup = await getSourceMapLookup(scriptUrl);
+        if (!lookup) return;
 
-        var consumer = new lib.SourceMapConsumer(mapJson);
-
-        byScript[scriptUrl].forEach(function(item) {
-          var frame = item.frame;
-          var original = consumer.originalPositionFor({
-            line:   frame.line,
-            column: frame.column,
-          });
-
-          // Use original name if found, otherwise keep minified
-          var realName = original.name || frame.name;
-          if (realName && realName !== frame.name) {
-            resolved[frame.name] = realName;
-            if (state.options.logToConsole) {
-              console.log('[WebProfiler] Resolved: ' + frame.name + ' → ' + realName);
-            }
-          } else {
-            resolved[frame.name] = frame.name;
+        byScript[scriptUrl].forEach(function(frame) {
+          var result = lookup(frame.line, frame.column);
+          var realName = (result && result.name) ? result.name : frame.name;
+          resolved[frame.name] = realName;
+          if (state.options.logToConsole && realName !== frame.name) {
+            console.log('[WebProfiler] ' + frame.name + ' → ' + realName);
           }
         });
-
-        consumer.destroy();
       }));
 
     } catch(e) {
-      if (state.options.logToConsole) console.warn('[WebProfiler] Source map resolution failed:', e);
+      if (state.options.logToConsole) console.warn('[WebProfiler] Resolution failed:', e.message);
     }
 
     return resolved;
