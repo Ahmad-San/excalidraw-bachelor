@@ -1017,37 +1017,33 @@
 
       var profile = buildFirefoxProfile();
       var json = JSON.stringify(profile);
+      var blob = new Blob([json], { type: 'application/json' });
 
       try {
-        // Upload to jsonbin.io (free, no account needed for reading)
-        var res = await fetch('https://api.jsonbin.io/v3/b', {
+        // 0x0.st — free file host, no auth, returns plain URL
+        var form = new FormData();
+        form.append('file', blob, 'profile.json');
+
+        var res = await fetch('https://0x0.st', {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Bin-Private': 'false',  // public bin so Firefox Profiler can fetch it
-          },
-          body: json,
+          body: form,
         });
 
-        var data = await res.json();
-        var binId = data.metadata && data.metadata.id;
-        if (!binId) throw new Error('No bin ID returned');
+        var rawUrl = (await res.text()).trim();
+        if (!rawUrl.startsWith('http')) throw new Error('Invalid URL: ' + rawUrl);
 
-        // Direct URL to the raw JSON
-        var rawUrl = 'https://api.jsonbin.io/v3/b/' + binId + '/latest';
-
-        // Firefox Profiler can load from URL
         var profilerUrl = 'https://profiler.firefox.com/from-url/' + encodeURIComponent(rawUrl);
 
         if (status) status.textContent = 'opening profiler…';
         window.open(profilerUrl, '_blank');
 
         if (state.options.logToConsole) {
-          console.log('[WebProfiler] Profile uploaded. Opening:', profilerUrl);
+          console.log('[WebProfiler] Profile at:', rawUrl);
+          console.log('[WebProfiler] Opening:', profilerUrl);
         }
 
       } catch(e) {
-        if (status) status.textContent = 'upload failed — try FFX button';
+        if (status) status.textContent = 'upload failed — use FFX button';
         console.warn('[WebProfiler] Upload failed:', e.message);
       }
     },
