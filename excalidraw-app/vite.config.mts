@@ -362,7 +362,7 @@ export default defineConfig(({ mode }) => {
         },
       }),
       createHtmlPlugin({
-        minify: false,
+        minify: true,
       }),
     ],
     publicDir: "../public",

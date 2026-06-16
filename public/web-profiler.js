@@ -632,10 +632,94 @@
     }
   }
 
+  // ── Source Map Resolution via stacktrace-gps ────────────────
+  // Resolves minified names like 'BO', 'ur' → real names like
+  // 'renderScene', 'updateElements' using the .map files from build.
+  // Loaded dynamically from CDN — only when native profiler is used.
+
+  var gps = null; // stacktrace-gps instance
+
+  function loadStacktraceGPS() {
+    return new Promise(function(resolve, reject) {
+      if (gps) { resolve(gps); return; }
+      // Load stackframe first (dependency of stacktrace-gps)
+      var s1 = document.createElement('script');
+      s1.src = 'https://cdn.jsdelivr.net/npm/stackframe@1.3.4/stackframe.min.js';
+      s1.onload = function() {
+        var s2 = document.createElement('script');
+        s2.src = 'https://cdn.jsdelivr.net/npm/stacktrace-gps@3.1.2/dist/stacktrace-gps.min.js';
+        s2.onload = function() {
+          gps = new global.StackTraceGPS();
+          if (state.options.logToConsole) console.log('[WebProfiler] stacktrace-gps loaded.');
+          resolve(gps);
+        };
+        s2.onerror = reject;
+        document.head.appendChild(s2);
+      };
+      s1.onerror = reject;
+      document.head.appendChild(s1);
+    });
+  }
+
+  // Resolve all unique frame names in a trace using source maps
+  // Returns a map of { minifiedName → resolvedName }
+  async function resolveFrameNames(trace) {
+    var resolved = {};
+    if (!trace || !trace.frames) return resolved;
+
+    try {
+      var g = await loadStacktraceGPS();
+
+      // Get unique frames that have location info
+      var frames = trace.frames.filter(function(f) {
+        return f && f.name && f.line !== undefined && f.column !== undefined;
+      });
+
+      // Build script URL map from resourceId
+      var scripts = {};
+      if (trace.resources) {
+        trace.resources.forEach(function(url, i) {
+          scripts[i] = url;
+        });
+      }
+
+      // Resolve each frame in parallel
+      var promises = frames.map(function(frame) {
+        var scriptUrl = scripts[frame.resourceId] || '';
+        if (!scriptUrl) {
+          resolved[frame.name] = frame.name; // can't resolve without URL
+          return Promise.resolve();
+        }
+        var sf = new global.StackFrame({
+          functionName: frame.name,
+          fileName: scriptUrl,
+          lineNumber: frame.line,
+          columnNumber: frame.column,
+        });
+        return g.pinpoint(sf).then(function(newFrame) {
+          var realName = newFrame.functionName || frame.name;
+          resolved[frame.name] = realName;
+          if (state.options.logToConsole && realName !== frame.name) {
+            console.log('[WebProfiler] Resolved: ' + frame.name + ' → ' + realName);
+          }
+        }).catch(function() {
+          resolved[frame.name] = frame.name; // keep original on error
+        });
+      });
+
+      await Promise.all(promises);
+    } catch(e) {
+      if (state.options.logToConsole) console.warn('[WebProfiler] Source map resolution failed:', e);
+    }
+
+    return resolved;
+  }
+
   // Convert native Profiler trace into our callTree format
   // so it works with the existing Firefox export and HUD
-  function nativeTraceToCallTrees(trace) {
+  function nativeTraceToCallTrees(trace, nameMap) {
     if (!trace || !trace.samples.length) return [];
+    nameMap = nameMap || {};
 
     // Build a map of stackId → full call path
     function resolveStack(stackId) {
@@ -644,7 +728,8 @@
       if (!stack) return [];
       var parent = resolveStack(stack.parentId);
       var frame  = trace.frames[stack.frameId];
-      var name   = frame ? (frame.name || 'anonymous') : 'unknown';
+      var rawName = frame ? (frame.name || 'anonymous') : 'unknown';
+      var name = nameMap[rawName] || rawName; // use resolved name if available
       return parent.concat([name]);
     }
 
@@ -747,7 +832,16 @@
       }
       var trace = await stopNativeProfiler();
       if (trace) {
-        var trees = nativeTraceToCallTrees(trace);
+        // Show resolving status in HUD
+        var status = hud ? hud.querySelector('#__wp_status__') : null;
+        if (status) status.textContent = 'resolving names via source maps…';
+
+        // Try to resolve minified names via source maps
+        var nameMap = await resolveFrameNames(trace);
+        var resolved = Object.keys(nameMap).filter(function(k){ return nameMap[k] !== k; }).length;
+        if (state.options.logToConsole) console.log('[WebProfiler] Resolved ' + resolved + ' function names.');
+
+        var trees = nativeTraceToCallTrees(trace, nameMap);
         state.callTrees = state.callTrees.concat(trees);
         updateHUD();
         if (state.options.logToConsole) {
