@@ -1006,59 +1006,65 @@
     // ── Open directly in Firefox Profiler (no download needed) ─
     // Opens profiler.firefox.com in a new tab and sends the profile
     // via postMessage — works even on browsers that can't download files.
-    openInFirefoxProfiler: function () {
+    openInFirefoxProfiler: async function () {
       if (!state.callTrees.length && !state.latencySamples.length) {
         console.warn('[WebProfiler] No data to open.');
         return;
       }
 
       var status = hud ? hud.querySelector('#__wp_status__') : null;
-      if (status) status.textContent = 'opening Firefox Profiler…';
+      if (status) status.textContent = 'compressing profile…';
 
       var profile = buildFirefoxProfile();
-      var origin = 'https://profiler.firefox.com';
-      var profilerTab = window.open(origin + '/from-post-message/', '_blank');
+      var json = JSON.stringify(profile);
 
-      if (!profilerTab) {
-        if (status) status.textContent = 'popup blocked — use FFX button';
-        console.warn('[WebProfiler] Popup blocked.');
-        return;
+      try {
+        if (typeof CompressionStream === 'undefined') {
+          throw new Error('CompressionStream not supported in this browser');
+        }
+
+        // gzip-compress the JSON — required by compressed-store endpoint
+        var jsonBytes = new TextEncoder().encode(json);
+        var cs = new CompressionStream('gzip');
+        var writer = cs.writable.getWriter();
+        writer.write(jsonBytes);
+        writer.close();
+        var compressedBuffer = await new Response(cs.readable).arrayBuffer();
+
+        if (status) status.textContent = 'uploading to Firefox Profiler…';
+
+        var res = await fetch('https://api.profiler.firefox.com/compressed-store', {
+          method: 'POST',
+          headers: {
+            'Accept': 'application/vnd.firefox-profiler+json;version=1.0',
+            'Content-Type': 'application/octet-stream',
+          },
+          body: compressedBuffer,
+        });
+
+        if (!res.ok) throw new Error('Upload failed: ' + res.status);
+
+        // Response is a JWT — decode base64url payload to get profileToken
+        var jwt = (await res.text()).trim();
+        var b64 = jwt.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+        var payload = JSON.parse(atob(b64));
+        var profileToken = payload.profileToken;
+        if (!profileToken) throw new Error('No profile token in response');
+
+        var profilerUrl = 'https://profiler.firefox.com/public/' + profileToken;
+
+        if (status) status.textContent = 'opening profiler…';
+        window.open(profilerUrl, '_blank');
+
+        if (state.options.logToConsole) {
+          console.log('[WebProfiler] Profile token:', profileToken);
+          console.log('[WebProfiler] URL:', profilerUrl);
+        }
+
+      } catch(e) {
+        if (status) status.textContent = 'failed — use FFX button';
+        console.warn('[WebProfiler] Upload failed:', e.message);
       }
-
-      var isReady = false;
-
-      // Listen for ready:response from profiler
-      function listener(event) {
-        if (event.origin !== origin) return;
-        if (event.data && event.data.name === 'ready:response') {
-          isReady = true;
-          window.removeEventListener('message', listener);
-          profilerTab.postMessage({ name: 'inject-profile', profile: profile }, origin);
-          if (status) status.textContent = 'profile injected!';
-          if (state.options.logToConsole) console.log('[WebProfiler] Profile injected.');
-        }
-      }
-
-      window.addEventListener('message', listener);
-
-      // Poll with ready:request until profiler responds
-      var attempts = 0;
-      var ping = setInterval(function () {
-        if (isReady || attempts > 40) {
-          clearInterval(ping);
-          if (!isReady) {
-            window.removeEventListener('message', listener);
-            if (status) status.textContent = 'timeout — use FFX button';
-          }
-          return;
-        }
-        attempts++;
-        try {
-          profilerTab.postMessage({ name: 'ready:request' }, origin);
-        } catch(e) {
-          clearInterval(ping);
-        }
-      }, 250);
     },
 
     exportFirefox: function () {
