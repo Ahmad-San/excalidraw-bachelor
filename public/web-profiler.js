@@ -46,7 +46,7 @@
     callTrees: [],
     currentTree: null,
     isDrawing: false,
-    strokeCanvasCalls: [],
+    interactionCanvasCalls: [],
   };
 
   function avg(arr) {
@@ -84,7 +84,7 @@
         state.canvasTimings[method].push(elapsed);
         if (state.canvasTimings[method].length > 200) state.canvasTimings[method].shift();
         if (state.isDrawing && state.currentTree) {
-          state.strokeCanvasCalls.push({ name: method, durationMs: elapsed });
+          state.interactionCanvasCalls.push({ name: method, durationMs: elapsed });
         }
         return result;
       };
@@ -110,9 +110,9 @@
     if (state.options.stylusOnly && e.pointerType === 'mouse') return;
     state.pointerDownTime = performance.now();
     state.isDrawing = true;
-    state.strokeCanvasCalls = [];
+    state.interactionCanvasCalls = [];
     state.currentTree = {
-      name: 'stroke_' + (state.callTrees.length + 1),
+      name: 'interaction_' + (state.callTrees.length + 1),
       pointerType: e.pointerType,
       startMs: state.pointerDownTime,
       endMs: null,
@@ -156,16 +156,16 @@
     var now = performance.now();
     state.currentTree.endMs = now;
     state.currentTree.durationMs = parseFloat((now - state.currentTree.startMs).toFixed(3));
-    if (state.strokeCanvasCalls.length) {
+    if (state.interactionCanvasCalls.length) {
       var grouped = {};
-      state.strokeCanvasCalls.forEach(function (c) {
+      state.interactionCanvasCalls.forEach(function (c) {
         if (!grouped[c.name]) grouped[c.name] = { name: c.name, calls: 0, totalMs: 0 };
         grouped[c.name].calls++;
         grouped[c.name].totalMs += c.durationMs;
       });
       state.currentTree.children.push({
-        name: 'pointermove → canvas (' + state.strokeCanvasCalls.length + ' calls)',
-        durationMs: parseFloat(state.strokeCanvasCalls.reduce(function (a, b) { return a + b.durationMs; }, 0).toFixed(3)),
+        name: 'pointermove → canvas (' + state.interactionCanvasCalls.length + ' calls)',
+        durationMs: parseFloat(state.interactionCanvasCalls.reduce(function (a, b) { return a + b.durationMs; }, 0).toFixed(3)),
         children: Object.keys(grouped).map(function (k) {
           var g = grouped[k];
           return { name: k + ' ×' + g.calls, durationMs: parseFloat(g.totalMs.toFixed(3)), children: [] };
@@ -175,7 +175,7 @@
     state.callTrees.push(state.currentTree);
     if (state.callTrees.length > 50) state.callTrees.shift();
     state.currentTree = null;
-    state.strokeCanvasCalls = [];
+    state.interactionCanvasCalls = [];
     updateHUD();
   }
 
@@ -444,10 +444,10 @@
       '</div>',
       '<div style="color:#555570;font-size:9px;margin-bottom:4px">CANVAS CALLS (avg ms)</div>',
       '<div id="__wp_canvas__" style="display:flex;flex-direction:column;gap:3px;margin-bottom:10px"></div>',
-      '<div style="color:#555570;font-size:9px;margin-bottom:4px">LAST 8 STROKES</div>',
+      '<div style="color:#555570;font-size:9px;margin-bottom:4px">LAST 8 INTERACTIONS</div>',
       '<div id="__wp_bars__" style="display:flex;align-items:flex-end;gap:3px;height:24px;margin-bottom:8px"></div>',
       '<div id="__wp_tree_panel__" style="display:none;margin-top:8px;border-top:1px solid #2a2a3a;padding-top:8px">',
-      '<div style="color:#555570;font-size:9px;margin-bottom:4px">LAST STROKE PIPELINE</div>',
+      '<div style="color:#555570;font-size:9px;margin-bottom:4px">LAST INTERACTION PIPELINE</div>',
       '<div id="__wp_tree_content__" style="font-size:9px;line-height:1.9;color:#888;max-height:180px;overflow-y:auto;white-space:nowrap"></div>',
       '</div>',
       '<div style="display:flex;align-items:center;gap:6px;margin-top:6px">',
@@ -484,7 +484,7 @@
     var content = hud.querySelector('#__wp_tree_content__');
     if (!content) return;
     if (!state.callTrees.length) {
-      content.innerHTML = '<span style="color:#555570">draw a stroke first</span>';
+      content.innerHTML = '<span style="color:#555570">no interactions yet</span>';
       return;
     }
     var tree = state.callTrees[state.callTrees.length - 1];
@@ -591,7 +591,7 @@
       if (state.options.logToConsole) {
         console.log('[WebProfiler] JS Self-Profiling API available — using native profiler.');
       }
-      updateHUDMode('native');
+      // HUD mode will be updated after createHUD() in init()
     } catch (e) {
       // NotAllowedError = missing Document-Policy header
       // Fall through to manual mode
@@ -632,6 +632,8 @@
     }
   }
 
+  // ── Source Map Resolution removed (not needed when code is not minified)
+
   // Convert native Profiler trace into our callTree format
   // so it works with the existing Firefox export and HUD
   function nativeTraceToCallTrees(trace) {
@@ -644,33 +646,33 @@
       if (!stack) return [];
       var parent = resolveStack(stack.parentId);
       var frame  = trace.frames[stack.frameId];
-      var name   = frame ? (frame.name || 'anonymous') : 'unknown';
+      var name = frame ? (frame.name || 'anonymous') : 'unknown';
       return parent.concat([name]);
     }
 
-    // Group samples by time proximity into "strokes"
-    // (gap > 500ms = new stroke)
-    var strokes = [];
-    var currentStroke = null;
+    // Group samples by time proximity into "interactions"
+    // (gap > 500ms = new interaction)
+    var interactions = [];
+    var currentInteraction = null;
     var GAP = 500;
 
     trace.samples.forEach(function (sample) {
-      if (!currentStroke || (sample.timestamp - currentStroke.lastTime) > GAP) {
-        currentStroke = { samples: [], lastTime: sample.timestamp };
-        strokes.push(currentStroke);
+      if (!currentInteraction || (sample.timestamp - currentInteraction.lastTime) > GAP) {
+        currentInteraction = { samples: [], lastTime: sample.timestamp };
+        interactions.push(currentInteraction);
       }
-      currentStroke.samples.push(sample);
-      currentStroke.lastTime = sample.timestamp;
+      currentInteraction.samples.push(sample);
+      currentInteraction.lastTime = sample.timestamp;
     });
 
-    // Convert each stroke into a call tree node
-    return strokes.map(function (stroke, i) {
-      var startMs = stroke.samples[0].timestamp;
-      var endMs   = stroke.samples[stroke.samples.length - 1].timestamp;
+    // Convert each interaction into a call tree node
+    return interactions.map(function (interaction, i) {
+      var startMs = interaction.samples[0].timestamp;
+      var endMs   = interaction.samples[interaction.samples.length - 1].timestamp;
 
       // Count how often each function appears
       var funcCounts = {};
-      stroke.samples.forEach(function (sample) {
+      interaction.samples.forEach(function (sample) {
         var path = resolveStack(sample.stackId);
         path.forEach(function (name) {
           funcCounts[name] = (funcCounts[name] || 0) + 1;
@@ -689,7 +691,7 @@
         });
 
       return {
-        name: 'stroke_native_' + (i + 1),
+        name: 'interaction_native_' + (i + 1),
         pointerType: 'pen',
         startMs: startMs,
         endMs: endMs,
@@ -732,6 +734,8 @@
       state.fpsLastTime = performance.now();
       fpsTick();
       if (state.options.overlay) hud = createHUD();
+      // Update HUD mode AFTER hud is created
+      if (nativeProfiler) updateHUDMode('native');
       state.active = true;
       if (state.options.logToConsole) console.log('[WebProfiler] initialized. Mode: ' + (nativeProfiler ? 'NATIVE' : 'MANUAL'));
       return this;
@@ -745,11 +749,14 @@
       }
       var trace = await stopNativeProfiler();
       if (trace) {
+        var status = hud ? hud.querySelector('#__wp_status__') : null;
+        if (status) status.textContent = 'processing native trace…';
+
         var trees = nativeTraceToCallTrees(trace);
         state.callTrees = state.callTrees.concat(trees);
         updateHUD();
         if (state.options.logToConsole) {
-          console.log('[WebProfiler] Native trace merged:', trees.length, 'strokes.');
+          console.log('[WebProfiler] Native trace merged:', trees.length, 'interactions.');
         }
       }
       return trace;
@@ -813,7 +820,7 @@
       }
       if (state.callTrees.length) {
         sections.push('=== CALL TREES ===');
-        sections.push('stroke,depth,node,duration_ms,pointer_type');
+        sections.push('interaction,depth,node,duration_ms,pointer_type');
         state.callTrees.forEach(function (tree, ti) {
           function exportNode(node, depth) {
             sections.push((ti + 1) + ',' + depth + ',' + node.name + ',' + (node.durationMs || 0) + ',' + (tree.pointerType || 'unknown'));
@@ -839,53 +846,65 @@
     // ── Open directly in Firefox Profiler (no download needed) ─
     // Opens profiler.firefox.com in a new tab and sends the profile
     // via postMessage — works even on browsers that can't download files.
-    openInFirefoxProfiler: function () {
+    openInFirefoxProfiler: async function () {
       if (!state.callTrees.length && !state.latencySamples.length) {
         console.warn('[WebProfiler] No data to open.');
         return;
       }
+
+      var status = hud ? hud.querySelector('#__wp_status__') : null;
+      if (status) status.textContent = 'compressing profile…';
+
       var profile = buildFirefoxProfile();
-      var origin = 'https://profiler.firefox.com';
+      var json = JSON.stringify(profile);
 
-      // Must open at /from-post-message/ for postMessage injection to work
-      var profilerTab = window.open(origin + '/from-post-message/', '_blank');
-      if (!profilerTab) {
-        console.warn('[WebProfiler] Popup blocked. Please allow popups for this site.');
-        return;
-      }
-
-      // Wait for profiler to send 'ready:response', then inject profile
-      function onMessage(event) {
-        if (event.origin !== origin) return;
-        if (event.data && event.data.name === 'ready:response') {
-          window.removeEventListener('message', onMessage);
-          profilerTab.postMessage({ name: 'inject-profile', profile: profile }, origin);
-          if (state.options.logToConsole) {
-            console.log('[WebProfiler] Profile injected into profiler.firefox.com');
-          }
+      try {
+        if (typeof CompressionStream === 'undefined') {
+          throw new Error('CompressionStream not supported in this browser');
         }
-      }
 
-      window.addEventListener('message', onMessage);
+        // gzip-compress the JSON — required by compressed-store endpoint
+        var jsonBytes = new TextEncoder().encode(json);
+        var cs = new CompressionStream('gzip');
+        var writer = cs.writable.getWriter();
+        writer.write(jsonBytes);
+        writer.close();
+        var compressedBuffer = await new Response(cs.readable).arrayBuffer();
 
-      // Send ready:request to kick off the handshake
-      // (profiler may already be ready by the time we add the listener)
-      var attempts = 0;
-      var ping = setInterval(function () {
-        attempts++;
-        profilerTab.postMessage({ name: 'ready:request' }, origin);
-        if (attempts > 20) clearInterval(ping); // stop after 10 seconds
-      }, 500);
+        if (status) status.textContent = 'uploading to Firefox Profiler…';
 
-      // Clean up ping once we get the response
-      var origOnMessage = onMessage;
-      window.addEventListener('message', function cleanup(event) {
-        if (event.origin !== origin) return;
-        if (event.data && event.data.name === 'ready:response') {
-          clearInterval(ping);
-          window.removeEventListener('message', cleanup);
+        var res = await fetch('https://api.profiler.firefox.com/compressed-store', {
+          method: 'POST',
+          headers: {
+            'Accept': 'application/vnd.firefox-profiler+json;version=1.0',
+            'Content-Type': 'application/octet-stream',
+          },
+          body: compressedBuffer,
+        });
+
+        if (!res.ok) throw new Error('Upload failed: ' + res.status);
+
+        // Response is a JWT — decode base64url payload to get profileToken
+        var jwt = (await res.text()).trim();
+        var b64 = jwt.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+        var payload = JSON.parse(atob(b64));
+        var profileToken = payload.profileToken;
+        if (!profileToken) throw new Error('No profile token in response');
+
+        var profilerUrl = 'https://profiler.firefox.com/public/' + profileToken;
+
+        if (status) status.textContent = 'opening profiler…';
+        window.open(profilerUrl, '_blank');
+
+        if (state.options.logToConsole) {
+          console.log('[WebProfiler] Profile token:', profileToken);
+          console.log('[WebProfiler] URL:', profilerUrl);
         }
-      });
+
+      } catch(e) {
+        if (status) status.textContent = 'failed — use FFX button';
+        console.warn('[WebProfiler] Upload failed:', e.message);
+      }
     },
 
     exportFirefox: function () {
@@ -905,7 +924,7 @@
 
     clear: function () {
       state.latencySamples = []; state.memorySamples = []; state.callTrees = [];
-      state.currentTree = null; state.strokeCanvasCalls = []; state.isDrawing = false;
+      state.currentTree = null; state.interactionCanvasCalls = []; state.isDrawing = false;
       Object.keys(state.canvasTimings).forEach(function (k) { state.canvasTimings[k] = []; });
       state.startTime = performance.now();
       if (hud) {
