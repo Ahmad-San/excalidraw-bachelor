@@ -83,7 +83,7 @@
         var elapsed = parseFloat((performance.now() - t).toFixed(3));
         state.canvasTimings[method].push(elapsed);
         if (state.canvasTimings[method].length > 200) state.canvasTimings[method].shift();
-        if (state.isDrawing) {
+        if (state.isDrawing && state.currentTree) {
           state.strokeCanvasCalls.push({ name: method, durationMs: elapsed });
         }
         return result;
@@ -112,7 +112,7 @@
     state.isDrawing = true;
     state.strokeCanvasCalls = [];
     state.currentTree = {
-      name: 'interaction_' + (state.callTrees.length + 1),
+      name: 'stroke_' + (state.callTrees.length + 1),
       pointerType: e.pointerType,
       startMs: state.pointerDownTime,
       endMs: null,
@@ -152,47 +152,31 @@
 
   function onPointerUp() {
     if (!state.isDrawing || !state.currentTree) return;
-
-    var treeRef  = state.currentTree;
-    var downTime = treeRef.startMs;
-
-    // Don't reset strokeCanvasCalls yet — keep capturing into it
-    // Don't set isDrawing = false yet — canvas calls still coming
-    state.currentTree = null; // allow next interaction to start
-
-    requestAnimationFrame(function () {
-      requestAnimationFrame(function () {
-        // NOW stop capturing
-        state.isDrawing = false;
-        var callsRef = state.strokeCanvasCalls;
-        state.strokeCanvasCalls = [];
-
-        var now = performance.now();
-        treeRef.endMs = now;
-        treeRef.durationMs = parseFloat((now - downTime).toFixed(3));
-
-        if (callsRef.length) {
-          var grouped = {};
-          callsRef.forEach(function (c) {
-            if (!grouped[c.name]) grouped[c.name] = { calls: 0, totalMs: 0 };
-            grouped[c.name].calls++;
-            grouped[c.name].totalMs += c.durationMs;
-          });
-          treeRef.children.push({
-            name: 'pointermove → canvas (' + callsRef.length + ' calls)',
-            durationMs: parseFloat(callsRef.reduce(function(a,b){return a+b.durationMs;},0).toFixed(3)),
-            children: Object.keys(grouped).map(function(k) {
-              var g = grouped[k];
-              return { name: k + ' ×' + g.calls, durationMs: parseFloat(g.totalMs.toFixed(3)), children: [] };
-            }),
-          });
-        }
-
-        state.callTrees.push(treeRef);
-        if (state.callTrees.length > 50) state.callTrees.shift();
-        updateHUD();
+    state.isDrawing = false;
+    var now = performance.now();
+    state.currentTree.endMs = now;
+    state.currentTree.durationMs = parseFloat((now - state.currentTree.startMs).toFixed(3));
+    if (state.strokeCanvasCalls.length) {
+      var grouped = {};
+      state.strokeCanvasCalls.forEach(function (c) {
+        if (!grouped[c.name]) grouped[c.name] = { name: c.name, calls: 0, totalMs: 0 };
+        grouped[c.name].calls++;
+        grouped[c.name].totalMs += c.durationMs;
       });
-    });
+      state.currentTree.children.push({
+        name: 'pointermove → canvas (' + state.strokeCanvasCalls.length + ' calls)',
+        durationMs: parseFloat(state.strokeCanvasCalls.reduce(function (a, b) { return a + b.durationMs; }, 0).toFixed(3)),
+        children: Object.keys(grouped).map(function (k) {
+          var g = grouped[k];
+          return { name: k + ' ×' + g.calls, durationMs: parseFloat(g.totalMs.toFixed(3)), children: [] };
+        }),
+      });
+    }
+    state.callTrees.push(state.currentTree);
+    if (state.callTrees.length > 50) state.callTrees.shift();
+    state.currentTree = null;
+    state.strokeCanvasCalls = [];
+    updateHUD();
   }
 
   function fpsTick() {
@@ -324,50 +308,33 @@
     }
 
     function processNode(node, parentStackIdx, timeOffset) {
-      var funcIdx  = getOrCreateFunc(node.name);
+      var funcIdx = getOrCreateFunc(node.name);
       var frameIdx = getOrCreateFrame(funcIdx);
       var stackIdx = addStack(frameIdx, parentStackIdx);
 
       var nodeStart = timeOffset;
-      var nodeDur   = node.durationMs || 0.1;
-      var nodeEnd   = nodeStart + nodeDur;
+      var nodeEnd = timeOffset + (node.durationMs || 0);
 
-      // Sample for this node
       samples.stack.push(stackIdx);
       samples.time.push(parseFloat(nodeStart.toFixed(3)));
       samples.responsiveness.push(null);
-      samples.weight.push(nodeDur);
+      samples.weight.push(node.durationMs || 0);
       samples.length++;
 
-      // Marker for this node
       markers.data.push([
         internString(node.name),
         parseFloat(nodeStart.toFixed(3)),
         parseFloat(nodeEnd.toFixed(3)),
-        1, 0, null,
+        1,
+        0,
+        null,
       ]);
 
-      // Children — spread evenly across parent duration if they have no real offset
-      var children = node.children || [];
-      if (children.length) {
-        // Calculate total children duration
-        var totalChildDur = children.reduce(function(a, c) { return a + (c.durationMs || 0.1); }, 0);
-        // Scale factor — fit children within parent duration
-        var scale = nodeDur > 0 && totalChildDur > 0 ? nodeDur / totalChildDur : 1;
-
-        var childOffset = nodeStart;
-        children.forEach(function(child) {
-          var scaledDur = (child.durationMs || 0.1) * scale;
-          // Create a copy with scaled duration for correct timeline placement
-          var scaledChild = {
-            name: child.name,
-            durationMs: parseFloat(scaledDur.toFixed(3)),
-            children: child.children || [],
-          };
-          processNode(scaledChild, stackIdx, childOffset);
-          childOffset += scaledDur;
-        });
-      }
+      var childOffset = nodeStart;
+      (node.children || []).forEach(function (child) {
+        processNode(child, stackIdx, childOffset);
+        childOffset += (child.durationMs || 0);
+      });
     }
 
     state.callTrees.forEach(function (tree) {
@@ -386,9 +353,6 @@
         null,
       ]);
     });
-
-    // Sort markers by start time — Firefox Profiler requires this
-    markers.data.sort(function(a, b) { return a[1] - b[1]; });
 
     var profileDuration = performance.now() - state.startTime;
 
@@ -725,7 +689,7 @@
         });
 
       return {
-        name: 'interaction_native_' + (i + 1),
+        name: 'stroke_native_' + (i + 1),
         pointerType: 'pen',
         startMs: startMs,
         endMs: endMs,

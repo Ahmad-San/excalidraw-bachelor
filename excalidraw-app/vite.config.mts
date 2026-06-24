@@ -151,6 +151,7 @@ export default defineConfig(({ mode }) => {
     },
     build: {
       outDir: "build",
+      minify: false,
       rollupOptions: {
         output: {
           assetFileNames(chunkInfo) {
