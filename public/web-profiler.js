@@ -31,7 +31,6 @@
 
     latencySamples: [],
     pointerDownTime: 0,
-    rafPending: false,
 
     fps: 0,
     fpsFrames: 0,
@@ -44,6 +43,7 @@
     memoryInterval: null,
 
     callTrees: [],
+    interactionCount: 0,
     currentTree: null,
     isDrawing: false,
     interactionCanvasCalls: [],
@@ -83,7 +83,7 @@
         var elapsed = parseFloat((performance.now() - t).toFixed(3));
         state.canvasTimings[method].push(elapsed);
         if (state.canvasTimings[method].length > 200) state.canvasTimings[method].shift();
-        if (state.isDrawing && state.currentTree) {
+        if (state.isDrawing) {
           state.interactionCanvasCalls.push({ name: method, durationMs: elapsed });
         }
         return result;
@@ -111,8 +111,9 @@
     state.pointerDownTime = performance.now();
     state.isDrawing = true;
     state.interactionCanvasCalls = [];
+    state.interactionCount++;
     state.currentTree = {
-      name: 'interaction_' + (state.callTrees.length + 1),
+      name: 'interaction_' + state.interactionCount,
       pointerType: e.pointerType,
       startMs: state.pointerDownTime,
       endMs: null,
@@ -124,59 +125,81 @@
         children: [],
       }],
     };
-    if (!state.rafPending) {
-      state.rafPending = true;
-      requestAnimationFrame(function () {
-        var latency = Math.round(performance.now() - state.pointerDownTime);
-        state.rafPending = false;
-        if (state.currentTree) {
-          state.currentTree.children.push({
-            name: 'first-rAF (latency)',
-            durationMs: latency,
-            children: [],
-          });
-          state.currentTree.latencyMs = latency;
-        }
-        state.latencySamples.push({
-          ms: latency,
-          pointerType: e.pointerType,
-          timestamp: new Date().toISOString(),
-          timeFromStart: parseFloat((state.pointerDownTime - state.startTime).toFixed(3)),
+
+    // Capture per-interaction closure — avoids rafPending guard which
+    // caused interactions fired in quick succession to skip latency
+    // measurement entirely when the previous rAF hadn't fired yet.
+    var treeRef = state.currentTree;
+    var downTime = state.pointerDownTime;
+
+    requestAnimationFrame(function () {
+      var latency = Math.round(performance.now() - downTime);
+      if (treeRef) {
+        treeRef.children.push({
+          name: 'first-rAF (latency)',
+          durationMs: latency,
+          children: [],
         });
-        if (state.options.logToConsole) console.log('[WebProfiler] latency: ' + latency + 'ms');
-        if (typeof state.options.onLatency === 'function') state.options.onLatency(latency);
-        updateHUD();
+        treeRef.latencyMs = latency;
+      }
+      state.latencySamples.push({
+        ms: latency,
+        pointerType: e.pointerType,
+        timestamp: new Date().toISOString(),
+        timeFromStart: parseFloat((downTime - state.startTime).toFixed(3)),
       });
-    }
+      if (state.options.logToConsole) console.log('[WebProfiler] latency: ' + latency + 'ms');
+      if (typeof state.options.onLatency === 'function') state.options.onLatency(latency);
+      updateHUD();
+    });
   }
 
   function onPointerUp() {
     if (!state.isDrawing || !state.currentTree) return;
-    state.isDrawing = false;
-    var now = performance.now();
-    state.currentTree.endMs = now;
-    state.currentTree.durationMs = parseFloat((now - state.currentTree.startMs).toFixed(3));
-    if (state.interactionCanvasCalls.length) {
-      var grouped = {};
-      state.interactionCanvasCalls.forEach(function (c) {
-        if (!grouped[c.name]) grouped[c.name] = { name: c.name, calls: 0, totalMs: 0 };
-        grouped[c.name].calls++;
-        grouped[c.name].totalMs += c.durationMs;
-      });
-      state.currentTree.children.push({
-        name: 'pointermove → canvas (' + state.interactionCanvasCalls.length + ' calls)',
-        durationMs: parseFloat(state.interactionCanvasCalls.reduce(function (a, b) { return a + b.durationMs; }, 0).toFixed(3)),
-        children: Object.keys(grouped).map(function (k) {
-          var g = grouped[k];
-          return { name: k + ' ×' + g.calls, durationMs: parseFloat(g.totalMs.toFixed(3)), children: [] };
-        }),
-      });
-    }
-    state.callTrees.push(state.currentTree);
-    if (state.callTrees.length > 50) state.callTrees.shift();
+
+    // Capture refs before nulling — Excalidraw renders its final frame
+    // AFTER pointerup fires, so we keep isDrawing=true and currentTree
+    // alive until those canvas calls land, then close the tree.
+    var treeRef = state.currentTree;
+    var callsRef = state.interactionCanvasCalls;
+    var downTime = treeRef.startMs;
+
+    // Null currentTree immediately so the next interaction can start,
+    // but keep isDrawing=true so post-pointerup canvas calls still
+    // get captured into callsRef (which still references the old array).
     state.currentTree = null;
     state.interactionCanvasCalls = [];
-    updateHUD();
+
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        // Now safe to stop capturing — final frame has rendered
+        state.isDrawing = false;
+
+        var now = performance.now();
+        treeRef.endMs = now;
+        treeRef.durationMs = parseFloat((now - downTime).toFixed(3));
+
+        if (callsRef.length) {
+          var grouped = {};
+          callsRef.forEach(function (c) {
+            if (!grouped[c.name]) grouped[c.name] = { name: c.name, calls: 0, totalMs: 0 };
+            grouped[c.name].calls++;
+            grouped[c.name].totalMs += c.durationMs;
+          });
+          treeRef.children.push({
+            name: 'pointermove → canvas (' + callsRef.length + ' calls)',
+            durationMs: parseFloat(callsRef.reduce(function (a, b) { return a + b.durationMs; }, 0).toFixed(3)),
+            children: Object.keys(grouped).map(function (k) {
+              var g = grouped[k];
+              return { name: k + ' ×' + g.calls, durationMs: parseFloat(g.totalMs.toFixed(3)), children: [] };
+            }),
+          });
+        }
+
+        state.callTrees.push(treeRef);
+        updateHUD();
+      });
+    });
   }
 
   function fpsTick() {
@@ -330,15 +353,23 @@
         null,
       ]);
 
+      var children = node.children || [];
       var childOffset = nodeStart;
-      (node.children || []).forEach(function (child) {
+      children.forEach(function (child) {
         processNode(child, stackIdx, childOffset);
-        childOffset += (child.durationMs || 0);
+        childOffset += (child.durationMs || 0.1);
       });
     }
 
+    // Use earliest tree startMs as base — this way the timeline in
+    // Firefox Profiler always starts near 0ms regardless of how long
+    // the user waited before drawing the first interaction.
+    var baseTime = state.callTrees.length
+      ? state.callTrees[0].startMs
+      : state.startTime;
+
     state.callTrees.forEach(function (tree) {
-      var treeOffset = tree.startMs - state.startTime;
+      var treeOffset = tree.startMs - baseTime;
       processNode(tree, null, treeOffset);
     });
 
@@ -359,7 +390,7 @@
     return {
       meta: {
         interval: 1,
-        startTime: state.startTime,
+        startTime: baseTime,
         processType: 0,
         product: 'WebProfiler (Excalidraw / Tizen)',
         stackwalk: 0,
@@ -632,12 +663,165 @@
     }
   }
 
-  // ── Source Map Resolution removed (not needed when code is not minified)
+  // ── Source Map Resolution (built-in, no dependencies) ────────
+  // Implements a minimal VLQ source map decoder directly — no CDN,
+  // no WASM, no external dependencies. Works everywhere including
+  // Tizen 5.2 and Edge with tracking prevention enabled.
+
+  var sourceMapCache = {}; // cache of parsed consumers per script URL
+
+  // Base64 VLQ decoder — implements the source map spec
+  var B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  var B64_MAP = {};
+  for (var _i = 0; _i < B64.length; _i++) B64_MAP[B64[_i]] = _i;
+
+  function decodeVLQ(str, pos) {
+    var result = 0, shift = 0, digit, cont;
+    do {
+      digit = B64_MAP[str[pos++]];
+      cont  = digit & 32;
+      digit &= 31;
+      result += digit << shift;
+      shift  += 5;
+    } while (cont);
+    return { value: (result & 1) ? -(result >> 1) : (result >> 1), pos: pos };
+  }
+
+  // Parse a source map JSON into a lookup structure
+  // Returns a function: (line, column) → { name, source }
+  function parseSourceMap(mapJson) {
+    var names   = mapJson.names   || [];
+    var sources = mapJson.sources || [];
+    var mappings = mapJson.mappings || '';
+
+    // Parse all mappings into a sorted array
+    var segments = [];
+    var genLine = 0;
+    var srcFile = 0, srcLine = 0, srcCol = 0, nameIdx = 0;
+
+    var lines = mappings.split(';');
+    for (var li = 0; li < lines.length; li++) {
+      genLine = li;
+      var genCol = 0;
+      var parts = lines[li].split(',');
+      for (var pi = 0; pi < parts.length; pi++) {
+        var seg = parts[pi];
+        if (!seg) continue;
+        var pos = 0;
+        var r;
+
+        r = decodeVLQ(seg, pos); genCol  += r.value; pos = r.pos;
+        if (pos >= seg.length) continue;
+        r = decodeVLQ(seg, pos); srcFile += r.value; pos = r.pos;
+        if (pos >= seg.length) continue;
+        r = decodeVLQ(seg, pos); srcLine += r.value; pos = r.pos;
+        if (pos >= seg.length) continue;
+        r = decodeVLQ(seg, pos); srcCol  += r.value; pos = r.pos;
+
+        var nameIndex = -1;
+        if (pos < seg.length) {
+          r = decodeVLQ(seg, pos); nameIdx += r.value;
+          nameIndex = nameIdx;
+        }
+
+        segments.push({
+          gl: genLine, gc: genCol,
+          name: nameIndex >= 0 ? names[nameIndex] : null,
+          source: sources[srcFile] || null,
+        });
+      }
+    }
+
+    // Lookup: find closest segment for a given generated line/column
+    return function lookup(line, column) {
+      // line is 1-based in profiler, 0-based in source map
+      var targetLine = line - 1;
+      var best = null;
+      for (var i = 0; i < segments.length; i++) {
+        var s = segments[i];
+        if (s.gl === targetLine && s.gc <= column) {
+          if (!best || s.gc > best.gc) best = s;
+        }
+      }
+      return best;
+    };
+  }
+
+  // Fetch and parse a source map for a script URL
+  async function getSourceMapLookup(scriptUrl) {
+    if (sourceMapCache[scriptUrl]) return sourceMapCache[scriptUrl];
+    try {
+      var jsRes  = await fetch(scriptUrl);
+      var jsText = await jsRes.text();
+      var match  = jsText.match(/\/\/# sourceMappingURL=(.+)$/m);
+      if (!match) return null;
+
+      var mapUrl = match[1].startsWith('http')
+        ? match[1]
+        : new URL(match[1], scriptUrl).href;
+
+      var mapRes  = await fetch(mapUrl);
+      var mapJson = await mapRes.json();
+      var lookup  = parseSourceMap(mapJson);
+      sourceMapCache[scriptUrl] = lookup;
+      if (state.options.logToConsole) console.log('[WebProfiler] Source map parsed:', mapUrl);
+      return lookup;
+    } catch(e) {
+      if (state.options.logToConsole) console.warn('[WebProfiler] Source map fetch failed:', scriptUrl, e.message);
+      return null;
+    }
+  }
+
+  // Resolve all frame names in a native profiler trace
+  // Returns { minifiedName → realName }
+  async function resolveFrameNames(trace) {
+    var resolved = {};
+    if (!trace || !trace.frames) return resolved;
+
+    try {
+      // Build script URL map from resourceId
+      var scripts = {};
+      if (trace.resources) {
+        trace.resources.forEach(function(url, i) { scripts[i] = url; });
+      }
+
+      // Group frames by script
+      var byScript = {};
+      trace.frames.forEach(function(frame) {
+        if (!frame || frame.line === undefined || frame.column === undefined) return;
+        var url = scripts[frame.resourceId];
+        if (!url) return;
+        if (!byScript[url]) byScript[url] = [];
+        byScript[url].push(frame);
+      });
+
+      // Resolve each script's frames
+      await Promise.all(Object.keys(byScript).map(async function(scriptUrl) {
+        var lookup = await getSourceMapLookup(scriptUrl);
+        if (!lookup) return;
+
+        byScript[scriptUrl].forEach(function(frame) {
+          var result = lookup(frame.line, frame.column);
+          var realName = (result && result.name) ? result.name : frame.name;
+          resolved[frame.name] = realName;
+          if (state.options.logToConsole && realName !== frame.name) {
+            console.log('[WebProfiler] ' + frame.name + ' → ' + realName);
+          }
+        });
+      }));
+
+    } catch(e) {
+      if (state.options.logToConsole) console.warn('[WebProfiler] Resolution failed:', e.message);
+    }
+
+    return resolved;
+  }
 
   // Convert native Profiler trace into our callTree format
   // so it works with the existing Firefox export and HUD
-  function nativeTraceToCallTrees(trace) {
+  function nativeTraceToCallTrees(trace, nameMap) {
     if (!trace || !trace.samples.length) return [];
+    nameMap = nameMap || {};
 
     // Build a map of stackId → full call path
     function resolveStack(stackId) {
@@ -646,7 +830,8 @@
       if (!stack) return [];
       var parent = resolveStack(stack.parentId);
       var frame  = trace.frames[stack.frameId];
-      var name = frame ? (frame.name || 'anonymous') : 'unknown';
+      var rawName = frame ? (frame.name || 'anonymous') : 'unknown';
+      var name = nameMap[rawName] || rawName; // use resolved name if available
       return parent.concat([name]);
     }
 
@@ -749,10 +934,16 @@
       }
       var trace = await stopNativeProfiler();
       if (trace) {
+        // Show resolving status in HUD
         var status = hud ? hud.querySelector('#__wp_status__') : null;
-        if (status) status.textContent = 'processing native trace…';
+        if (status) status.textContent = 'resolving names via source maps…';
 
-        var trees = nativeTraceToCallTrees(trace);
+        // Try to resolve minified names via source maps
+        var nameMap = await resolveFrameNames(trace);
+        var resolved = Object.keys(nameMap).filter(function(k){ return nameMap[k] !== k; }).length;
+        if (state.options.logToConsole) console.log('[WebProfiler] Resolved ' + resolved + ' function names.');
+
+        var trees = nativeTraceToCallTrees(trace, nameMap);
         state.callTrees = state.callTrees.concat(trees);
         updateHUD();
         if (state.options.logToConsole) {
@@ -924,6 +1115,7 @@
 
     clear: function () {
       state.latencySamples = []; state.memorySamples = []; state.callTrees = [];
+      state.interactionCount = 0;
       state.currentTree = null; state.interactionCanvasCalls = []; state.isDrawing = false;
       Object.keys(state.canvasTimings).forEach(function (k) { state.canvasTimings[k] = []; });
       state.startTime = performance.now();
