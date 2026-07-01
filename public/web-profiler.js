@@ -108,6 +108,8 @@
 
   function onPointerDown(e) {
     if (state.options.stylusOnly && e.pointerType === 'mouse') return;
+    // #9 — ignore touches/clicks within the HUD itself
+    if (hud && hud.contains(e.target)) return;
     state.pointerDownTime = performance.now();
     state.isDrawing = true;
     state.interactionCanvasCalls = [];
@@ -437,76 +439,151 @@
 
   var hud = null;
 
+  // HUD theme state
+  var hudTheme = 'dark';
+
+  function getThemeVars() {
+    return hudTheme === 'dark' ? {
+      bg:      'rgba(8,8,14,0.93)',
+      border:  '#2a2a3a',
+      color:   '#e8e8f0',
+      muted:   '#555570',
+      label:   '#888',
+    } : {
+      bg:      'rgba(245,245,250,0.97)',
+      border:  '#d0d0e0',
+      color:   '#111120',
+      muted:   '#888899',
+      label:   '#444455',
+    };
+  }
+
+  function applyTheme(el) {
+    var t = getThemeVars();
+    el.style.background = t.bg;
+    el.style.border = '1px solid ' + t.border;
+    el.style.color = t.color;
+    // update muted labels
+    el.querySelectorAll('[data-muted]').forEach(function (e) { e.style.color = t.muted; });
+    el.querySelectorAll('[data-label]').forEach(function (e) { e.style.color = t.label; });
+  }
+
   function createHUD() {
+    var t = getThemeVars();
     var el = document.createElement('div');
     el.id = '__web_profiler_hud__';
     el.style.cssText = [
       'position:fixed', 'bottom:20px', 'right:20px',
       'z-index:2147483647',
-      'background:rgba(8,8,14,0.93)',
-      'border:1px solid #2a2a3a', 'border-radius:10px',
-      'padding:14px 18px', 'font-family:monospace', 'font-size:11px',
-      'color:#e8e8f0', 'min-width:240px',
-      'box-shadow:0 4px 32px rgba(0,0,0,0.6)',
+      'background:' + t.bg,
+      'border:1px solid ' + t.border,
+      'border-radius:10px',
+      'padding:10px 14px',
+      'font-family:monospace', 'font-size:11px',
+      'color:' + t.color,
+      'min-width:220px', 'max-width:300px',
+      'box-shadow:0 4px 32px rgba(0,0,0,0.5)',
       'user-select:none', 'cursor:move',
+      'transition:all 0.15s ease',
     ].join(';');
 
     el.innerHTML = [
-      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">',
+      // ── Title bar ──────────────────────────────────────────
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">',
       '<span id="__wp_title__" style="color:#00e5ff;font-weight:700;font-size:10px;letter-spacing:0.08em">⬡ WEB PROFILER [MANUAL]</span>',
-      '<div style="display:flex;gap:5px">',
-      '<button id="__wp_tree__"    style="background:transparent;border:1px solid #2a2a3a;color:#888;font-family:monospace;font-size:9px;padding:2px 6px;border-radius:3px;cursor:pointer">TREE</button>',
+      '<div style="display:flex;gap:4px;align-items:center">',
+      '<button id="__wp_theme__"  title="Toggle theme"   style="background:transparent;border:1px solid #555570;color:#888;font-family:monospace;font-size:9px;padding:1px 5px;border-radius:3px;cursor:pointer">☀</button>',
+      '<button id="__wp_min__"    title="Minimize"       style="background:transparent;border:1px solid #555570;color:#888;font-family:monospace;font-size:9px;padding:1px 5px;border-radius:3px;cursor:pointer">▲</button>',
+      '</div>',
+      '</div>',
+
+      // ── Collapsible body ───────────────────────────────────
+      '<div id="__wp_body__">',
+
+      // Action buttons
+      '<div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px">',
       '<button id="__wp_stop__"    style="background:transparent;border:1px solid #a8ff78;color:#a8ff78;font-family:monospace;font-size:9px;padding:2px 6px;border-radius:3px;cursor:pointer;display:none">STOP</button>',
       '<button id="__wp_export__"  style="background:transparent;border:1px solid #2a2a3a;color:#888;font-family:monospace;font-size:9px;padding:2px 6px;border-radius:3px;cursor:pointer">CSV</button>',
       '<button id="__wp_firefox__" style="background:transparent;border:1px solid #ff9500;color:#ff9500;font-family:monospace;font-size:9px;padding:2px 6px;border-radius:3px;cursor:pointer">FFX</button>',
       '<button id="__wp_open__"    style="background:transparent;border:1px solid #a855f7;color:#a855f7;font-family:monospace;font-size:9px;padding:2px 6px;border-radius:3px;cursor:pointer">OPEN</button>',
       '<button id="__wp_clear__"   style="background:transparent;border:1px solid #2a2a3a;color:#888;font-family:monospace;font-size:9px;padding:2px 6px;border-radius:3px;cursor:pointer">CLR</button>',
       '</div>',
+
+      // Metrics row
+      '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:8px">',
+      '<div><div data-muted style="font-size:9px;margin-bottom:2px">FPS</div>',
+      '<div id="__wp_fps__" style="font-size:18px;font-weight:700;color:#00e5ff;line-height:1">—</div></div>',
+      '<div><div data-muted style="font-size:9px;margin-bottom:2px">AVG LAT</div>',
+      '<div id="__wp_lat__" style="font-size:18px;font-weight:700;color:#00e5ff;line-height:1">—</div>',
+      '<div data-muted style="font-size:9px">ms</div></div>',
+      '<div><div data-muted style="font-size:9px;margin-bottom:2px">MEM</div>',
+      '<div id="__wp_mem__" style="font-size:18px;font-weight:700;color:#00e5ff;line-height:1">—</div>',
+      '<div data-muted style="font-size:9px">MB</div></div>',
       '</div>',
-      '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px">',
-      '<div><div style="color:#555570;font-size:9px;margin-bottom:2px">FPS</div>',
-      '<div id="__wp_fps__" style="font-size:20px;font-weight:700;color:#00e5ff;line-height:1">—</div></div>',
-      '<div><div style="color:#555570;font-size:9px;margin-bottom:2px">AVG LAT</div>',
-      '<div id="__wp_lat__" style="font-size:20px;font-weight:700;color:#00e5ff;line-height:1">—</div>',
-      '<div style="color:#555570;font-size:9px">ms</div></div>',
-      '<div><div style="color:#555570;font-size:9px;margin-bottom:2px">MEM</div>',
-      '<div id="__wp_mem__" style="font-size:20px;font-weight:700;color:#00e5ff;line-height:1">—</div>',
-      '<div style="color:#555570;font-size:9px">MB</div></div>',
+
+      // Canvas calls
+      '<div data-muted style="font-size:9px;margin-bottom:3px">CANVAS CALLS (avg ms)</div>',
+      '<div id="__wp_canvas__" style="display:flex;flex-direction:column;gap:2px;margin-bottom:8px"></div>',
+
+      // Latency bars
+      '<div data-muted style="font-size:9px;margin-bottom:3px">LAST 8 INTERACTIONS</div>',
+      '<div id="__wp_bars__" style="display:flex;align-items:flex-end;gap:3px;height:20px;margin-bottom:6px"></div>',
+
+      // Tree panel — open by default
+      '<div id="__wp_tree_panel__" style="margin-top:6px;border-top:1px solid #2a2a3a;padding-top:6px">',
+      '<div data-muted style="font-size:9px;margin-bottom:3px">LAST INTERACTION PIPELINE</div>',
+      '<div id="__wp_tree_content__" style="font-size:9px;line-height:1.8;color:#888;max-height:160px;overflow-y:auto;white-space:nowrap"></div>',
       '</div>',
-      '<div style="color:#555570;font-size:9px;margin-bottom:4px">CANVAS CALLS (avg ms)</div>',
-      '<div id="__wp_canvas__" style="display:flex;flex-direction:column;gap:3px;margin-bottom:10px"></div>',
-      '<div style="color:#555570;font-size:9px;margin-bottom:4px">LAST 8 INTERACTIONS</div>',
-      '<div id="__wp_bars__" style="display:flex;align-items:flex-end;gap:3px;height:24px;margin-bottom:8px"></div>',
-      '<div id="__wp_tree_panel__" style="display:none;margin-top:8px;border-top:1px solid #2a2a3a;padding-top:8px">',
-      '<div style="color:#555570;font-size:9px;margin-bottom:4px">LAST INTERACTION PIPELINE</div>',
-      '<div id="__wp_tree_content__" style="font-size:9px;line-height:1.9;color:#888;max-height:180px;overflow-y:auto;white-space:nowrap"></div>',
+
+      // Status row
+      '<div style="display:flex;align-items:center;gap:6px;margin-top:5px">',
+      '<div id="__wp_dot__" style="width:6px;height:6px;border-radius:50%;background:#555570;flex-shrink:0"></div>',
+      '<div id="__wp_status__" data-muted style="font-size:10px">waiting…</div>',
       '</div>',
-      '<div style="display:flex;align-items:center;gap:6px;margin-top:6px">',
-      '<div id="__wp_dot__" style="width:6px;height:6px;border-radius:50%;background:#555570"></div>',
-      '<div id="__wp_status__" style="color:#555570;font-size:10px">waiting…</div>',
-      '</div>',
+
+      '</div>', // end __wp_body__
     ].join('');
 
     document.body.appendChild(el);
 
-    el.querySelector('#__wp_export__').addEventListener('click', function (e) { e.stopPropagation(); WebProfiler.exportCSV(); });
+    // ── Button handlers ──────────────────────────────────────
+    el.querySelector('#__wp_export__').addEventListener('click',  function (e) { e.stopPropagation(); WebProfiler.exportCSV(); });
     el.querySelector('#__wp_firefox__').addEventListener('click', function (e) { e.stopPropagation(); WebProfiler.exportFirefox(); });
-    el.querySelector('#__wp_open__').addEventListener('click', function (e) { e.stopPropagation(); WebProfiler.openInFirefoxProfiler(); });
-    el.querySelector('#__wp_clear__').addEventListener('click', function (e) { e.stopPropagation(); WebProfiler.clear(); });
+    el.querySelector('#__wp_open__').addEventListener('click',    function (e) { e.stopPropagation(); WebProfiler.openInFirefoxProfiler(); });
+    el.querySelector('#__wp_clear__').addEventListener('click',   function (e) { e.stopPropagation(); WebProfiler.clear(); });
+
     el.querySelector('#__wp_stop__').addEventListener('click', function (e) {
       e.stopPropagation();
       WebProfiler.stopNative().then(function () {
         el.querySelector('#__wp_stop__').style.display = 'none';
       });
     });
-    el.querySelector('#__wp_tree__').addEventListener('click', function (e) {
+
+    // Minimize toggle
+    var minimized = false;
+    el.querySelector('#__wp_min__').addEventListener('click', function (e) {
       e.stopPropagation();
-      var panel = hud.querySelector('#__wp_tree_panel__');
-      panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
-      renderLastTree();
+      minimized = !minimized;
+      el.querySelector('#__wp_body__').style.display = minimized ? 'none' : 'block';
+      el.querySelector('#__wp_min__').textContent = minimized ? '▼' : '▲';
+      el.style.minWidth = minimized ? '0' : '220px';
+    });
+
+    // Theme toggle
+    el.querySelector('#__wp_theme__').addEventListener('click', function (e) {
+      e.stopPropagation();
+      hudTheme = hudTheme === 'dark' ? 'light' : 'dark';
+      var t2 = getThemeVars();
+      el.style.background = t2.bg;
+      el.style.border = '1px solid ' + t2.border;
+      el.style.color = t2.color;
+      el.querySelectorAll('[data-muted]').forEach(function (m) { m.style.color = t2.muted; });
+      el.querySelector('#__wp_theme__').textContent = hudTheme === 'dark' ? '☀' : '☾';
+      el.querySelector('#__wp_tree_panel__').style.borderTopColor = t2.border;
     });
 
     makeDraggable(el);
+    renderLastTree();
     return el;
   }
 
