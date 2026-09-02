@@ -299,7 +299,7 @@
         if (!domNode) {
           domNode = {
             name: 'DOM mutations',
-            durationMs: 0,
+            durationMs: null,
             children: [],
             _isDOMNode: true,
             _childList: 0,
@@ -317,6 +317,13 @@
           ' (nodes:' + domNode._childList +
           ' attrs:' + domNode._attributes +
           ' text:' + domNode._characters + ')';
+        // Update duration — time from pointerdown to last mutation
+        // This tells us how long the DOM kept changing after the input
+        if (state.pointerDownTime) {
+          domNode.durationMs = parseFloat(
+            (performance.now() - state.pointerDownTime).toFixed(3)
+          );
+        }
       });
 
       domObserver.observe(document.body, {
