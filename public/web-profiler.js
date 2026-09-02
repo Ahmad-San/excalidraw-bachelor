@@ -781,6 +781,12 @@
                   trees.forEach(function(t) {
                     t.name = 'interaction_native_' + meta.count;
                     t.latencyMs = latency;
+                    // Fix duration: use pointerdown time as start, not profiler start
+                    // (profiler runs continuously between interactions so its
+                    // startMs would include idle time between interactions)
+                    t.startMs = meta.downTime;
+                    t.endMs = meta.downTime + latency;
+                    t.durationMs = parseFloat((performance.now() - meta.downTime).toFixed(3));
                     t.children.unshift(
                       { name: 'event delay: ' + delay + 'ms', durationMs: delay, children: [] },
                       { name: 'event processing: ' + procTime + 'ms', durationMs: procTime, children: [] },
@@ -1112,12 +1118,16 @@
           var manualObs = new PerformanceObserver(function(list) {
             list.getEntries().forEach(function(entry) {
               if (entry.name !== 'pointerdown') return;
-              if (!state.currentTree) return;
+              // Observer fires after the interaction is complete
+              // so currentTree is null — use the last pushed callTree instead
+              var lastTree = state.callTrees[state.callTrees.length - 1];
+              if (!lastTree) return;
               var delay    = parseFloat((entry.processingStart - entry.startTime).toFixed(3));
               var procTime = parseFloat((entry.processingEnd - entry.processingStart).toFixed(3));
-              state.currentTree.children.push(
-                { name: 'event delay: ' + delay + 'ms', durationMs: delay, children: [] },
-                { name: 'event processing: ' + procTime + 'ms', durationMs: procTime, children: [] }
+              // Insert at beginning of children so it appears before rAF and canvas
+              lastTree.children.unshift(
+                { name: 'event processing: ' + procTime + 'ms', durationMs: procTime, children: [] },
+                { name: 'event delay: ' + delay + 'ms', durationMs: delay, children: [] }
               );
               updateHUD();
               if (state.options.logToConsole) {
