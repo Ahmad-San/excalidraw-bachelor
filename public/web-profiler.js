@@ -178,7 +178,6 @@
               if (!treeRefObs) return;
               var delay    = parseFloat((entry.processingStart - entry.startTime).toFixed(3));
               var procTime = parseFloat((entry.processingEnd - entry.processingStart).toFixed(3));
-              // Only add pointerdown timing — pointermove would flood the tree
               if (entry.name === 'pointerdown') {
                 treeRefObs.children.push({
                   name: 'event delay: ' + delay + 'ms',
@@ -190,6 +189,8 @@
                   durationMs: procTime,
                   children: [],
                 });
+                // Trigger HUD update so new nodes are visible
+                updateHUD();
               }
             });
           });
