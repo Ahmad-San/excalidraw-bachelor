@@ -48,6 +48,7 @@
     isDrawing: false,
     interactionCanvasCalls: [],
     eventObserver: null,
+    nativeInteractionMeta: null,
   };
 
   function avg(arr) {
@@ -116,111 +117,32 @@
 
     if (nativeProfiler && !nativeProfiler.stopped) {
       // ── NATIVE MODE ──────────────────────────────────────────
+      // The persistent PerformanceObserver (started in init) handles
+      // stopping/restarting the native profiler and building trees.
+      // Here we only measure rAF latency and update interaction metadata.
       state.isDrawing = false;
-      var nativeCount = state.interactionCount;
-      var nativeDownTime = state.pointerDownTime;
+      state.nativeInteractionMeta = {
+        count: state.interactionCount,
+        downTime: state.pointerDownTime,
+        pointerType: e.pointerType,
+        rafLatency: null,
+      };
 
-      // Bug 1 fix: measure rAF latency BEFORE stopping native profiler
-      // stopNativeProfiler() is async and takes time — measuring after it
-      // would give inflated values (e.g. 600ms instead of real 34ms)
-      var rafLatency = null;
       requestAnimationFrame(function() {
-        rafLatency = Math.round(performance.now() - nativeDownTime);
-        if (state.options.logToConsole) console.log('[WebProfiler] latency (native): ' + rafLatency + 'ms');
-        if (typeof state.options.onLatency === 'function') state.options.onLatency(rafLatency);
-        // Push latency sample immediately so HUD updates
+        var latency = Math.round(performance.now() - state.pointerDownTime);
+        if (state.nativeInteractionMeta) {
+          state.nativeInteractionMeta.rafLatency = latency;
+        }
         state.latencySamples.push({
-          ms: rafLatency,
+          ms: latency,
           pointerType: e.pointerType,
           timestamp: new Date().toISOString(),
-          timeFromStart: parseFloat((nativeDownTime - state.startTime).toFixed(3)),
+          timeFromStart: parseFloat((state.pointerDownTime - state.startTime).toFixed(3)),
         });
+        if (state.options.logToConsole) console.log('[WebProfiler] latency (native): ' + latency + 'ms');
+        if (typeof state.options.onLatency === 'function') state.options.onLatency(latency);
         updateHUD();
       });
-
-      if (typeof PerformanceObserver !== 'undefined') {
-        try {
-          if (state.eventObserver) {
-            state.eventObserver.disconnect();
-            state.eventObserver = null;
-          }
-          var obs = new PerformanceObserver(function(list) {
-            list.getEntries().forEach(function(entry) {
-              if (entry.name !== 'pointerdown') return;
-              // Bug 2 fix: disconnect only after processing, then restart
-              // profiler immediately so next pointerdown is covered
-              obs.disconnect();
-              state.eventObserver = null;
-
-              var delay    = parseFloat((entry.processingStart - entry.startTime).toFixed(3));
-              var procTime = parseFloat((entry.processingEnd - entry.processingStart).toFixed(3));
-
-              stopNativeProfiler().then(function(trace) {
-                // Restart profiler immediately so next interaction is covered
-                startNativeProfiler();
-
-                if (trace && trace.samples.length) {
-                  var filteredTrace = {
-                    frames: trace.frames,
-                    resources: trace.resources,
-                    stacks: trace.stacks,
-                    samples: trace.samples.filter(function(s) {
-                      return s.timestamp >= entry.startTime &&
-                             s.timestamp <= entry.processingEnd;
-                    }),
-                  };
-
-                  var trees = nativeTraceToCallTrees(filteredTrace, {});
-                  // Use already-measured rAF latency (not re-measured after async stop)
-                  var latency = rafLatency !== null ? rafLatency :
-                    Math.round(performance.now() - nativeDownTime);
-
-                  trees.forEach(function(t) {
-                    t.name = 'interaction_native_' + nativeCount;
-                    t.latencyMs = latency;
-                    t.children.unshift(
-                      { name: 'event delay: ' + delay + 'ms', durationMs: delay, children: [] },
-                      { name: 'event processing: ' + procTime + 'ms', durationMs: procTime, children: [] },
-                      { name: 'first-rAF (latency)', durationMs: latency, children: [] }
-                    );
-                  });
-
-                  state.callTrees = state.callTrees.concat(trees);
-                  updateHUD();
-
-                  if (state.options.logToConsole) {
-                    console.log('[WebProfiler] Native interaction_' + nativeCount +
-                      ': delay=' + delay + 'ms proc=' + procTime + 'ms samples=' +
-                      filteredTrace.samples.length);
-                  }
-                }
-              });
-            });
-          });
-          obs.observe({ type: 'event', durationThreshold: 0, buffered: false });
-          state.eventObserver = obs;
-        } catch(err) {
-          stopNativeProfiler().then(function(trace) {
-            startNativeProfiler();
-            if (trace && trace.samples.length) {
-              var trees = nativeTraceToCallTrees(trace, {});
-              trees.forEach(function(t) { t.name = 'interaction_native_' + nativeCount; });
-              state.callTrees = state.callTrees.concat(trees);
-              updateHUD();
-            }
-          });
-        }
-      } else {
-        stopNativeProfiler().then(function(trace) {
-          startNativeProfiler();
-          if (trace && trace.samples.length) {
-            var trees = nativeTraceToCallTrees(trace, {});
-            trees.forEach(function(t) { t.name = 'interaction_native_' + nativeCount; });
-            state.callTrees = state.callTrees.concat(trees);
-            updateHUD();
-          }
-        });
-      }
 
     } else {
       // ── MANUAL MODE ──────────────────────────────────────────
@@ -844,16 +766,79 @@
   function startNativeProfiler() {
     try {
       nativeProfiler = new global.Profiler({
-        sampleInterval: 10,   // sample every 10ms
-        maxBufferSize: 10000, // max 10000 samples
+        sampleInterval: 10,
+        maxBufferSize: 10000,
       });
       if (state.options.logToConsole) {
         console.log('[WebProfiler] JS Self-Profiling API available — using native profiler.');
       }
-      // HUD mode will be updated after createHUD() in init()
+
+      // Persistent PerformanceObserver — fires after every pointerdown event
+      // regardless of how many interactions happen. Uses nativeInteractionMeta
+      // set by onPointerDown to match event to interaction.
+      if (typeof PerformanceObserver !== 'undefined' && !state.eventObserver) {
+        try {
+          var persistentObs = new PerformanceObserver(function(list) {
+            list.getEntries().forEach(function(entry) {
+              if (entry.name !== 'pointerdown') return;
+              if (!state.nativeInteractionMeta) return;
+
+              var meta = state.nativeInteractionMeta;
+              state.nativeInteractionMeta = null; // consume it
+
+              var delay    = parseFloat((entry.processingStart - entry.startTime).toFixed(3));
+              var procTime = parseFloat((entry.processingEnd - entry.processingStart).toFixed(3));
+
+              stopNativeProfiler().then(function(trace) {
+                // Restart immediately for next interaction
+                startNativeProfiler();
+
+                if (trace && trace.samples.length) {
+                  var filteredTrace = {
+                    frames: trace.frames,
+                    resources: trace.resources,
+                    stacks: trace.stacks,
+                    samples: trace.samples.filter(function(s) {
+                      return s.timestamp >= entry.startTime &&
+                             s.timestamp <= entry.processingEnd;
+                    }),
+                  };
+
+                  var trees = nativeTraceToCallTrees(filteredTrace, {});
+                  var latency = meta.rafLatency !== null ? meta.rafLatency :
+                    Math.round(performance.now() - meta.downTime);
+
+                  trees.forEach(function(t) {
+                    t.name = 'interaction_native_' + meta.count;
+                    t.latencyMs = latency;
+                    t.children.unshift(
+                      { name: 'event delay: ' + delay + 'ms', durationMs: delay, children: [] },
+                      { name: 'event processing: ' + procTime + 'ms', durationMs: procTime, children: [] },
+                      { name: 'first-rAF (latency)', durationMs: latency, children: [] }
+                    );
+                  });
+
+                  state.callTrees = state.callTrees.concat(trees);
+                  updateHUD();
+
+                  if (state.options.logToConsole) {
+                    console.log('[WebProfiler] Native interaction_' + meta.count +
+                      ': delay=' + delay + 'ms proc=' + procTime + 'ms samples=' +
+                      filteredTrace.samples.length);
+                  }
+                }
+              });
+            });
+          });
+          persistentObs.observe({ type: 'event', durationThreshold: 0, buffered: false });
+          state.eventObserver = persistentObs;
+        } catch(err) {
+          if (state.options.logToConsole) {
+            console.log('[WebProfiler] EventTiming observer not supported:', err.message);
+          }
+        }
+      }
     } catch (e) {
-      // NotAllowedError = missing Document-Policy header
-      // Fall through to manual mode
       nativeProfiler = null;
       if (state.options.logToConsole) {
         console.log('[WebProfiler] JS Self-Profiling API not allowed (missing Document-Policy header). Using manual instrumentation.');
