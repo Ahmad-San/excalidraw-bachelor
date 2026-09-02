@@ -174,16 +174,20 @@
           var treeRefObs = state.currentTree;
           var obs = new PerformanceObserver(function(list) {
             list.getEntries().forEach(function(entry) {
-              if ((entry.name === 'pointerdown' || entry.name === 'pointermove')
-                  && treeRefObs) {
-                var procTime = parseFloat(
-                  (entry.processingEnd - entry.processingStart).toFixed(3)
-                );
+              if (entry.name !== 'pointerdown' && entry.name !== 'pointermove') return;
+              if (!treeRefObs) return;
+              var delay    = parseFloat((entry.processingStart - entry.startTime).toFixed(3));
+              var procTime = parseFloat((entry.processingEnd - entry.processingStart).toFixed(3));
+              // Only add pointerdown timing — pointermove would flood the tree
+              if (entry.name === 'pointerdown') {
                 treeRefObs.children.push({
-                  name: 'event: ' + entry.name +
-                    ' (processing: ' + procTime + 'ms' +
-                    ', delay: ' + parseFloat(entry.startTime.toFixed(3)) + 'ms)',
-                  durationMs: parseFloat(entry.duration.toFixed(3)),
+                  name: 'event delay: ' + delay + 'ms',
+                  durationMs: delay,
+                  children: [],
+                });
+                treeRefObs.children.push({
+                  name: 'event processing: ' + procTime + 'ms',
+                  durationMs: procTime,
                   children: [],
                 });
               }
