@@ -163,45 +163,8 @@
         }],
       };
 
-      // PerformanceObserver for event timing — durationThreshold:0 to
-      // capture all events not just slow ones (default threshold is 104ms)
-      if (typeof PerformanceObserver !== 'undefined') {
-        try {
-          if (state.eventObserver) {
-            state.eventObserver.disconnect();
-            state.eventObserver = null;
-          }
-          var treeRefObs = state.currentTree;
-          var obs = new PerformanceObserver(function(list) {
-            list.getEntries().forEach(function(entry) {
-              if (entry.name !== 'pointerdown' && entry.name !== 'pointermove') return;
-              if (!treeRefObs) return;
-              var delay    = parseFloat((entry.processingStart - entry.startTime).toFixed(3));
-              var procTime = parseFloat((entry.processingEnd - entry.processingStart).toFixed(3));
-              if (entry.name === 'pointerdown') {
-                treeRefObs.children.push({
-                  name: 'event delay: ' + delay + 'ms',
-                  durationMs: delay,
-                  children: [],
-                });
-                treeRefObs.children.push({
-                  name: 'event processing: ' + procTime + 'ms',
-                  durationMs: procTime,
-                  children: [],
-                });
-                // Trigger HUD update so new nodes are visible
-                updateHUD();
-              }
-            });
-          });
-          obs.observe({ type: 'event', durationThreshold: 0, buffered: false });
-          state.eventObserver = obs;
-        } catch(err) {
-          if (state.options.logToConsole) {
-            console.log('[WebProfiler] PerformanceObserver not supported:', err.message);
-          }
-        }
-      }
+      // PerformanceObserver is now persistent (started in init)
+      // No need to create per-interaction observer here
 
       // rAF latency measurement
       var treeRef = state.currentTree;
@@ -247,12 +210,7 @@
 
     requestAnimationFrame(function () {
       requestAnimationFrame(function () {
-        // Disconnect PerformanceObserver for this interaction
-        if (state.eventObserver) {
-          state.eventObserver.disconnect();
-          state.eventObserver = null;
-        }
-
+        // isDrawing kept true until here so post-pointerup canvas calls are captured
         state.isDrawing = false;
 
         var now = performance.now();
@@ -1146,6 +1104,36 @@
       if (state.options.overlay) hud = createHUD();
       // Update HUD mode AFTER hud is created
       if (nativeProfiler) updateHUDMode('native');
+
+      // Persistent PerformanceObserver for MANUAL mode event timing
+      // Started here (not in onPointerDown) so it catches every pointerdown
+      if (!nativeProfiler && typeof PerformanceObserver !== 'undefined') {
+        try {
+          var manualObs = new PerformanceObserver(function(list) {
+            list.getEntries().forEach(function(entry) {
+              if (entry.name !== 'pointerdown') return;
+              if (!state.currentTree) return;
+              var delay    = parseFloat((entry.processingStart - entry.startTime).toFixed(3));
+              var procTime = parseFloat((entry.processingEnd - entry.processingStart).toFixed(3));
+              state.currentTree.children.push(
+                { name: 'event delay: ' + delay + 'ms', durationMs: delay, children: [] },
+                { name: 'event processing: ' + procTime + 'ms', durationMs: procTime, children: [] }
+              );
+              updateHUD();
+              if (state.options.logToConsole) {
+                console.log('[WebProfiler] event delay: ' + delay + 'ms, processing: ' + procTime + 'ms');
+              }
+            });
+          });
+          manualObs.observe({ type: 'event', durationThreshold: 0, buffered: false });
+          state.eventObserver = manualObs;
+        } catch(err) {
+          if (state.options.logToConsole) {
+            console.log('[WebProfiler] EventTiming not supported:', err.message);
+          }
+        }
+      }
+
       state.active = true;
       if (state.options.logToConsole) console.log('[WebProfiler] initialized. Mode: ' + (nativeProfiler ? 'NATIVE' : 'MANUAL'));
       return this;
@@ -1345,7 +1333,6 @@
       state.latencySamples = []; state.memorySamples = []; state.callTrees = [];
       state.interactionCount = 0;
       state.currentTree = null; state.interactionCanvasCalls = []; state.isDrawing = false;
-      if (state.eventObserver) { state.eventObserver.disconnect(); state.eventObserver = null; }
       Object.keys(state.canvasTimings).forEach(function (k) { state.canvasTimings[k] = []; });
       state.startTime = performance.now();
       if (hud) {
