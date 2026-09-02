@@ -112,106 +112,123 @@
     // #9 — ignore touches/clicks within the HUD itself
     if (hud && hud.contains(e.target)) return;
     state.pointerDownTime = performance.now();
-    state.isDrawing = true;
-    state.interactionCanvasCalls = [];
     state.interactionCount++;
-    state.currentTree = {
-      name: 'interaction_' + state.interactionCount,
-      pointerType: e.pointerType,
-      startMs: state.pointerDownTime,
-      endMs: null,
-      durationMs: null,
-      latencyMs: null,
-      children: [{
-        name: 'pointerdown',
-        durationMs: parseFloat((performance.now() - state.pointerDownTime).toFixed(3)),
-        children: [],
-      }],
-    };
 
-    // Native profiler: stop previous interaction's trace and restart
-    // so each interaction gets its own native call stack snapshot
     if (nativeProfiler && !nativeProfiler.stopped) {
-      var prevTreeRef = state.callTrees.length > 0
-        ? state.callTrees[state.callTrees.length - 1]
-        : null;
+      // ── NATIVE MODE ──────────────────────────────────────────
+      // Stop previous interaction's trace, build its tree, restart
+      // Don't build manual canvas tree — native gives real callstack
+      state.isDrawing = false; // don't capture canvas calls in native mode
+      var nativeInteractionName = 'interaction_' + state.interactionCount;
+
+      // Still measure rAF latency — works independently of profiling mode
+      var downTimeNative = state.pointerDownTime;
+      requestAnimationFrame(function() {
+        var latency = Math.round(performance.now() - downTimeNative);
+        state.latencySamples.push({
+          ms: latency,
+          pointerType: e.pointerType,
+          timestamp: new Date().toISOString(),
+          timeFromStart: parseFloat((downTimeNative - state.startTime).toFixed(3)),
+        });
+        if (state.options.logToConsole) console.log('[WebProfiler] latency (native): ' + latency + 'ms');
+        if (typeof state.options.onLatency === 'function') state.options.onLatency(latency);
+        updateHUD();
+      });
       stopNativeProfiler().then(function(trace) {
-        if (trace) {
+        if (trace && trace.samples.length) {
           var trees = nativeTraceToCallTrees(trace, {});
+          // Rename to match interaction count
+          trees.forEach(function(t, i) {
+            t.name = 'interaction_native_' + (state.interactionCount - 1 + i);
+          });
           state.callTrees = state.callTrees.concat(trees);
           updateHUD();
           if (state.options.logToConsole) {
-            console.log('[WebProfiler] Native trace for interaction_' +
-              (state.interactionCount - 1) + ':', trees.length, 'groups,',
-              trace.samples.length, 'samples.');
+            console.log('[WebProfiler] Native:', trace.samples.length, 'samples for', nativeInteractionName);
           }
         }
-        // Restart native profiler for new interaction
         startNativeProfiler();
       });
-    }
 
-    // PerformanceObserver for event timing (manual mode supplement)
-    // Captures event processing duration from the browser's perspective
-    if (typeof PerformanceObserver !== 'undefined' && !nativeProfiler) {
-      try {
-        if (state.eventObserver) {
-          state.eventObserver.disconnect();
-          state.eventObserver = null;
-        }
-        var treeRefObs = state.currentTree;
-        var obs = new PerformanceObserver(function(list) {
-          list.getEntries().forEach(function(entry) {
-            if (entry.name === 'pointerdown' || entry.name === 'pointermove') {
-              if (treeRefObs) {
+    } else {
+      // ── MANUAL MODE ──────────────────────────────────────────
+      // Build manual canvas tree + rAF latency + PerformanceObserver
+      state.isDrawing = true;
+      state.interactionCanvasCalls = [];
+      state.currentTree = {
+        name: 'interaction_' + state.interactionCount,
+        pointerType: e.pointerType,
+        startMs: state.pointerDownTime,
+        endMs: null,
+        durationMs: null,
+        latencyMs: null,
+        children: [{
+          name: 'pointerdown',
+          durationMs: parseFloat((performance.now() - state.pointerDownTime).toFixed(3)),
+          children: [],
+        }],
+      };
+
+      // PerformanceObserver for event timing — durationThreshold:0 to
+      // capture all events not just slow ones (default threshold is 104ms)
+      if (typeof PerformanceObserver !== 'undefined') {
+        try {
+          if (state.eventObserver) {
+            state.eventObserver.disconnect();
+            state.eventObserver = null;
+          }
+          var treeRefObs = state.currentTree;
+          var obs = new PerformanceObserver(function(list) {
+            list.getEntries().forEach(function(entry) {
+              if ((entry.name === 'pointerdown' || entry.name === 'pointermove')
+                  && treeRefObs) {
+                var procTime = parseFloat(
+                  (entry.processingEnd - entry.processingStart).toFixed(3)
+                );
                 treeRefObs.children.push({
-                  name: 'event: ' + entry.name + ' (processingTime: ' +
-                    parseFloat(entry.processingEnd - entry.processingStart).toFixed(3) + 'ms)',
+                  name: 'event: ' + entry.name +
+                    ' (processing: ' + procTime + 'ms' +
+                    ', delay: ' + parseFloat(entry.startTime.toFixed(3)) + 'ms)',
                   durationMs: parseFloat(entry.duration.toFixed(3)),
                   children: [],
                 });
               }
-            }
+            });
           });
-        });
-        obs.observe({ type: 'event', buffered: false });
-        state.eventObserver = obs;
-        if (state.options.logToConsole) {
-          console.log('[WebProfiler] PerformanceObserver (event) started.');
-        }
-      } catch(e) {
-        if (state.options.logToConsole) {
-          console.log('[WebProfiler] PerformanceObserver not supported:', e.message);
+          obs.observe({ type: 'event', durationThreshold: 0, buffered: false });
+          state.eventObserver = obs;
+        } catch(err) {
+          if (state.options.logToConsole) {
+            console.log('[WebProfiler] PerformanceObserver not supported:', err.message);
+          }
         }
       }
-    }
 
-    // Capture per-interaction closure — avoids rafPending guard which
-    // caused interactions fired in quick succession to skip latency
-    // measurement entirely when the previous rAF hadn't fired yet.
-    var treeRef = state.currentTree;
-    var downTime = state.pointerDownTime;
-
-    requestAnimationFrame(function () {
-      var latency = Math.round(performance.now() - downTime);
-      if (treeRef) {
-        treeRef.children.push({
-          name: 'first-rAF (latency)',
-          durationMs: latency,
-          children: [],
+      // rAF latency measurement
+      var treeRef = state.currentTree;
+      var downTime = state.pointerDownTime;
+      requestAnimationFrame(function () {
+        var latency = Math.round(performance.now() - downTime);
+        if (treeRef) {
+          treeRef.children.push({
+            name: 'first-rAF (latency)',
+            durationMs: latency,
+            children: [],
+          });
+          treeRef.latencyMs = latency;
+        }
+        state.latencySamples.push({
+          ms: latency,
+          pointerType: e.pointerType,
+          timestamp: new Date().toISOString(),
+          timeFromStart: parseFloat((downTime - state.startTime).toFixed(3)),
         });
-        treeRef.latencyMs = latency;
-      }
-      state.latencySamples.push({
-        ms: latency,
-        pointerType: e.pointerType,
-        timestamp: new Date().toISOString(),
-        timeFromStart: parseFloat((downTime - state.startTime).toFixed(3)),
+        if (state.options.logToConsole) console.log('[WebProfiler] latency: ' + latency + 'ms');
+        if (typeof state.options.onLatency === 'function') state.options.onLatency(latency);
+        updateHUD();
       });
-      if (state.options.logToConsole) console.log('[WebProfiler] latency: ' + latency + 'ms');
-      if (typeof state.options.onLatency === 'function') state.options.onLatency(latency);
-      updateHUD();
-    });
+    }
   }
 
   function onPointerUp() {
