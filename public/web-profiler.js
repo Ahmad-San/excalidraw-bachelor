@@ -263,6 +263,125 @@
     state.rafLoop = requestAnimationFrame(fpsTick);
   }
 
+  // ── DOM Mutation Tracking ────────────────────────────────────
+  // Counts DOM changes (childList, attributes, characterData) that
+  // occur during an interaction — makes the profiler useful for
+  // DOM-based apps like Google Docs, Trello, React apps etc.
+
+  var domObserver = null;
+
+  function startDOMTracking() {
+    if (typeof MutationObserver === 'undefined') return;
+    try {
+      domObserver = new MutationObserver(function(mutations) {
+        if (!state.isDrawing || !state.currentTree) return;
+        var childListCount  = 0;
+        var attributeCount  = 0;
+        var characterCount  = 0;
+
+        mutations.forEach(function(m) {
+          if (m.type === 'childList')     childListCount  += m.addedNodes.length + m.removedNodes.length;
+          if (m.type === 'attributes')    attributeCount++;
+          if (m.type === 'characterData') characterCount++;
+        });
+
+        var total = childListCount + attributeCount + characterCount;
+        if (!total) return;
+
+        // Find or create the DOM mutations node in current tree
+        var domNode = null;
+        for (var i = 0; i < state.currentTree.children.length; i++) {
+          if (state.currentTree.children[i]._isDOMNode) {
+            domNode = state.currentTree.children[i];
+            break;
+          }
+        }
+        if (!domNode) {
+          domNode = {
+            name: 'DOM mutations',
+            durationMs: 0,
+            children: [],
+            _isDOMNode: true,
+            _childList: 0,
+            _attributes: 0,
+            _characters: 0,
+          };
+          state.currentTree.children.push(domNode);
+        }
+
+        domNode._childList  += childListCount;
+        domNode._attributes += attributeCount;
+        domNode._characters += characterCount;
+        var totalMutations   = domNode._childList + domNode._attributes + domNode._characters;
+        domNode.name = 'DOM mutations ×' + totalMutations +
+          ' (nodes:' + domNode._childList +
+          ' attrs:' + domNode._attributes +
+          ' text:' + domNode._characters + ')';
+      });
+
+      domObserver.observe(document.body, {
+        childList:     true,
+        attributes:    true,
+        subtree:       true,
+        characterData: true,
+      });
+
+      if (state.options.logToConsole) {
+        console.log('[WebProfiler] DOM mutation tracking started.');
+      }
+    } catch(e) {
+      if (state.options.logToConsole) {
+        console.warn('[WebProfiler] MutationObserver not supported:', e.message);
+      }
+    }
+  }
+
+  // ── Long Task Tracking ───────────────────────────────────────
+  // Long Tasks are JS tasks > 50ms that block the main thread.
+  // These are a key cause of jank and input latency.
+  // Works on Chrome/Edge — not available on Firefox or Tizen.
+
+  var longTaskObserver = null;
+  var longTasks = [];
+
+  function startLongTaskTracking() {
+    if (typeof PerformanceObserver === 'undefined') return;
+    try {
+      longTaskObserver = new PerformanceObserver(function(list) {
+        list.getEntries().forEach(function(entry) {
+          var task = {
+            startTime:  parseFloat(entry.startTime.toFixed(3)),
+            duration:   parseFloat(entry.duration.toFixed(3)),
+            timestamp:  new Date().toISOString(),
+          };
+          longTasks.push(task);
+
+          // If a long task happens during an interaction — add it to tree
+          if (state.isDrawing && state.currentTree) {
+            state.currentTree.children.push({
+              name: 'long task: ' + task.duration + 'ms',
+              durationMs: task.duration,
+              children: [],
+            });
+          }
+
+          if (state.options.logToConsole) {
+            console.log('[WebProfiler] Long task: ' + task.duration + 'ms');
+          }
+        });
+      });
+      longTaskObserver.observe({ type: 'longtask', buffered: false });
+
+      if (state.options.logToConsole) {
+        console.log('[WebProfiler] Long task tracking started.');
+      }
+    } catch(e) {
+      if (state.options.logToConsole) {
+        console.log('[WebProfiler] Long task tracking not supported:', e.message);
+      }
+    }
+  }
+
   function startMemorySampling() {
     if (!performance.memory) return;
     state.memoryInterval = setInterval(function () {
@@ -1149,8 +1268,10 @@
       if (state.active) return this;
       state.options = Object.assign({
         target: window, overlay: true, logToConsole: false,
-        stylusOnly: false, wrapCanvas: true, trackMemory: true, onLatency: null,
-        useNativeProfiler: true, // try JS Self-Profiling API first
+        stylusOnly: false, wrapCanvas: true, trackMemory: true,
+        trackDOM: true, trackLongTasks: true,
+        onLatency: null,
+        useNativeProfiler: true,
       }, options || {});
       state.startTime = performance.now();
       var target = state.options.target;
@@ -1171,6 +1292,8 @@
       // (latency, FPS, memory work regardless)
       if (state.options.wrapCanvas) wrapCanvasAPI();
       if (state.options.trackMemory) startMemorySampling();
+      if (state.options.trackDOM) startDOMTracking();
+      if (state.options.trackLongTasks) startLongTaskTracking();
       state.fpsLastTime = performance.now();
       fpsTick();
       if (state.options.overlay) hud = createHUD();
@@ -1283,6 +1406,7 @@
         maxMB: Math.max.apply(null, used), samples: state.memorySamples.slice()
       };
     },
+    getLongTasks: function () { return longTasks.slice(); },
 
     exportCSV: function () {
       var sections = [];
@@ -1317,6 +1441,14 @@
         sections.push('=== MEMORY ===');
         sections.push('sample,used_mb,total_mb,timestamp');
         state.memorySamples.forEach(function (s, i) { sections.push((i + 1) + ',' + s.usedMB + ',' + s.totalMB + ',' + s.timestamp); });
+        sections.push('');
+      }
+      if (longTasks.length) {
+        sections.push('=== LONG TASKS ===');
+        sections.push('sample,start_ms,duration_ms,timestamp');
+        longTasks.forEach(function(t, i) {
+          sections.push((i + 1) + ',' + t.startTime + ',' + t.duration + ',' + t.timestamp);
+        });
       }
       if (!sections.length) { console.warn('[WebProfiler] No data.'); return; }
       var blob = new Blob([sections.join('\n')], { type: 'text/csv' });
@@ -1408,6 +1540,7 @@
     clear: function () {
       state.latencySamples = []; state.memorySamples = []; state.callTrees = [];
       state.interactionCount = 0;
+      longTasks = [];
       state.currentTree = null; state.interactionCanvasCalls = []; state.isDrawing = false;
       Object.keys(state.canvasTimings).forEach(function (k) { state.canvasTimings[k] = []; });
       state.startTime = performance.now();
