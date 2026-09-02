@@ -330,9 +330,25 @@
     };
 
     var markers = {
-      schema: { name: 0, time: 1, endTime: 2, phase: 3, category: 4, data: 5 },
-      data: [],
+      name:      [],
+      startTime: [],
+      endTime:   [],
+      phase:     [],
+      category:  [],
+      data:      [],
+      length:    0,
     };
+
+    function addMarker(nameIdx, startMs, endMs) {
+      if (startMs < 0) return; // skip negative timestamps
+      markers.name.push(nameIdx);
+      markers.startTime.push(parseFloat(startMs.toFixed(3)));
+      markers.endTime.push(parseFloat(endMs.toFixed(3)));
+      markers.phase.push(1);
+      markers.category.push(0);
+      markers.data.push(null);
+      markers.length++;
+    }
 
     var funcCache = {};
 
@@ -392,14 +408,7 @@
       samples.weight.push(node.durationMs || 0);
       samples.length++;
 
-      markers.data.push([
-        internString(node.name),
-        parseFloat(nodeStart.toFixed(3)),
-        parseFloat(nodeEnd.toFixed(3)),
-        1,
-        0,
-        null,
-      ]);
+      addMarker(internString(node.name), nodeStart, nodeEnd);
 
       var children = node.children || [];
       var childOffset = nodeStart;
@@ -423,17 +432,25 @@
 
     state.latencySamples.forEach(function (s) {
       var timeFrom = (s.timeFromStart !== undefined) ? s.timeFromStart : (s.ms || 0);
-      markers.data.push([
+      addMarker(
         internString('Input Latency: ' + s.ms + 'ms'),
-        parseFloat(timeFrom.toFixed(3)),
-        parseFloat((timeFrom + s.ms).toFixed(3)),
-        1,
-        0,
-        null,
-      ]);
+        timeFrom,
+        timeFrom + s.ms
+      );
     });
 
     var profileDuration = performance.now() - state.startTime;
+
+    // Sort markers by startTime — required by Firefox Profiler
+    var mi = markers.startTime.map(function(_, i) { return i; });
+    mi.sort(function(a, b) { return markers.startTime[a] - markers.startTime[b]; });
+    markers.name      = mi.map(function(i) { return markers.name[i]; });
+    markers.startTime = mi.map(function(i) { return markers.startTime[i]; });
+    markers.endTime   = mi.map(function(i) { return markers.endTime[i]; });
+    markers.phase     = mi.map(function(i) { return markers.phase[i]; });
+    markers.category  = mi.map(function(i) { return markers.category[i]; });
+    markers.data      = mi.map(function(i) { return markers.data[i]; });
+    markers.length    = mi.length;
 
     return {
       meta: {
