@@ -795,20 +795,11 @@
                 startNativeProfiler();
 
                 if (trace && trace.samples.length) {
-                  var filteredTrace = {
-                    frames: trace.frames,
-                    resources: trace.resources,
-                    stacks: trace.stacks,
-                    samples: trace.samples.filter(function(s) {
-                      return s.timestamp >= entry.startTime &&
-                             s.timestamp <= entry.processingEnd;
-                    }),
-                  };
-
+                  // No filter needed — profiler was restarted at previous pointerdown
+                  // so all samples in this trace belong to this interaction
+                  var trees = nativeTraceToCallTrees(trace, {});
                   var latency = meta.rafLatency !== null ? meta.rafLatency :
                     Math.round(performance.now() - meta.downTime);
-
-                  var trees = nativeTraceToCallTrees(filteredTrace, {});
 
                   // Always create at least one tree node — even with no samples
                   // so HUD always updates after every interaction
@@ -840,7 +831,7 @@
                   if (state.options.logToConsole) {
                     console.log('[WebProfiler] Native interaction_' + meta.count +
                       ': delay=' + delay + 'ms proc=' + procTime + 'ms samples=' +
-                      filteredTrace.samples.length);
+                      trace.samples.length);
                   }
                 }
               });
