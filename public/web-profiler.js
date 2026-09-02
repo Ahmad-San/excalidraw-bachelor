@@ -116,39 +116,121 @@
 
     if (nativeProfiler && !nativeProfiler.stopped) {
       // ── NATIVE MODE ──────────────────────────────────────────
-      // Stop previous interaction's trace, build its tree, restart
-      // Don't build manual canvas tree — native gives real callstack
-      state.isDrawing = false; // don't capture canvas calls in native mode
-      var nativeInteractionName = 'interaction_' + state.interactionCount;
+      // Pattern from Nicholson (2021): keep a long-running profiler,
+      // use EventTiming (PerformanceObserver) to get the exact interaction
+      // window (startTime → processingEnd), filter native samples to that
+      // window, and add delay + processing time to the tree.
+      state.isDrawing = false;
+      var nativeCount = state.interactionCount;
+      var nativeDownTime = state.pointerDownTime;
 
-      // Still measure rAF latency — works independently of profiling mode
+      if (typeof PerformanceObserver !== 'undefined') {
+        try {
+          if (state.eventObserver) {
+            state.eventObserver.disconnect();
+            state.eventObserver = null;
+          }
+          var obs = new PerformanceObserver(function(list) {
+            list.getEntries().forEach(function(entry) {
+              if (entry.name !== 'pointerdown') return;
+              obs.disconnect();
+              state.eventObserver = null;
+
+              var delay    = parseFloat((entry.processingStart - entry.startTime).toFixed(3));
+              var procTime = parseFloat((entry.processingEnd - entry.processingStart).toFixed(3));
+
+              stopNativeProfiler().then(function(trace) {
+                if (trace && trace.samples.length) {
+                  // Filter samples to this interaction's window
+                  var filteredTrace = {
+                    frames: trace.frames,
+                    resources: trace.resources,
+                    stacks: trace.stacks,
+                    samples: trace.samples.filter(function(s) {
+                      return s.timestamp >= entry.startTime &&
+                             s.timestamp <= entry.processingEnd;
+                    }),
+                  };
+
+                  var trees = nativeTraceToCallTrees(filteredTrace, {});
+                  var latency = Math.round(performance.now() - nativeDownTime);
+
+                  trees.forEach(function(t) {
+                    t.name = 'interaction_native_' + nativeCount;
+                    t.latencyMs = latency;
+                    // Prepend event timing info as first children
+                    t.children.unshift(
+                      {
+                        name: 'event delay: ' + delay + 'ms',
+                        durationMs: delay,
+                        children: [],
+                      },
+                      {
+                        name: 'event processing: ' + procTime + 'ms',
+                        durationMs: procTime,
+                        children: [],
+                      },
+                      {
+                        name: 'first-rAF (latency)',
+                        durationMs: latency,
+                        children: [],
+                      }
+                    );
+                  });
+
+                  state.callTrees = state.callTrees.concat(trees);
+                  state.latencySamples.push({
+                    ms: latency,
+                    pointerType: e.pointerType,
+                    timestamp: new Date().toISOString(),
+                    timeFromStart: parseFloat((nativeDownTime - state.startTime).toFixed(3)),
+                  });
+                  updateHUD();
+
+                  if (state.options.logToConsole) {
+                    console.log('[WebProfiler] Native interaction_' + nativeCount +
+                      ': delay=' + delay + 'ms proc=' + procTime + 'ms samples=' +
+                      filteredTrace.samples.length);
+                  }
+                }
+                startNativeProfiler();
+              });
+            });
+          });
+          obs.observe({ type: 'event', durationThreshold: 0, buffered: false });
+          state.eventObserver = obs;
+        } catch(err) {
+          // Fallback — no EventTiming support
+          stopNativeProfiler().then(function(trace) {
+            if (trace && trace.samples.length) {
+              var trees = nativeTraceToCallTrees(trace, {});
+              trees.forEach(function(t) { t.name = 'interaction_native_' + nativeCount; });
+              state.callTrees = state.callTrees.concat(trees);
+              updateHUD();
+            }
+            startNativeProfiler();
+          });
+        }
+      } else {
+        // No PerformanceObserver — simple stop and restart
+        stopNativeProfiler().then(function(trace) {
+          if (trace && trace.samples.length) {
+            var trees = nativeTraceToCallTrees(trace, {});
+            trees.forEach(function(t) { t.name = 'interaction_native_' + nativeCount; });
+            state.callTrees = state.callTrees.concat(trees);
+            updateHUD();
+          }
+          startNativeProfiler();
+        });
+      }
+
+      // rAF latency always measured
       var downTimeNative = state.pointerDownTime;
       requestAnimationFrame(function() {
         var latency = Math.round(performance.now() - downTimeNative);
-        state.latencySamples.push({
-          ms: latency,
-          pointerType: e.pointerType,
-          timestamp: new Date().toISOString(),
-          timeFromStart: parseFloat((downTimeNative - state.startTime).toFixed(3)),
-        });
         if (state.options.logToConsole) console.log('[WebProfiler] latency (native): ' + latency + 'ms');
         if (typeof state.options.onLatency === 'function') state.options.onLatency(latency);
         updateHUD();
-      });
-      stopNativeProfiler().then(function(trace) {
-        if (trace && trace.samples.length) {
-          var trees = nativeTraceToCallTrees(trace, {});
-          // Rename to match interaction count
-          trees.forEach(function(t, i) {
-            t.name = 'interaction_native_' + (state.interactionCount - 1 + i);
-          });
-          state.callTrees = state.callTrees.concat(trees);
-          updateHUD();
-          if (state.options.logToConsole) {
-            console.log('[WebProfiler] Native:', trace.samples.length, 'samples for', nativeInteractionName);
-          }
-        }
-        startNativeProfiler();
       });
 
     } else {
