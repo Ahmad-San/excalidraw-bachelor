@@ -116,13 +116,27 @@
 
     if (nativeProfiler && !nativeProfiler.stopped) {
       // ── NATIVE MODE ──────────────────────────────────────────
-      // Pattern from Nicholson (2021): keep a long-running profiler,
-      // use EventTiming (PerformanceObserver) to get the exact interaction
-      // window (startTime → processingEnd), filter native samples to that
-      // window, and add delay + processing time to the tree.
       state.isDrawing = false;
       var nativeCount = state.interactionCount;
       var nativeDownTime = state.pointerDownTime;
+
+      // Bug 1 fix: measure rAF latency BEFORE stopping native profiler
+      // stopNativeProfiler() is async and takes time — measuring after it
+      // would give inflated values (e.g. 600ms instead of real 34ms)
+      var rafLatency = null;
+      requestAnimationFrame(function() {
+        rafLatency = Math.round(performance.now() - nativeDownTime);
+        if (state.options.logToConsole) console.log('[WebProfiler] latency (native): ' + rafLatency + 'ms');
+        if (typeof state.options.onLatency === 'function') state.options.onLatency(rafLatency);
+        // Push latency sample immediately so HUD updates
+        state.latencySamples.push({
+          ms: rafLatency,
+          pointerType: e.pointerType,
+          timestamp: new Date().toISOString(),
+          timeFromStart: parseFloat((nativeDownTime - state.startTime).toFixed(3)),
+        });
+        updateHUD();
+      });
 
       if (typeof PerformanceObserver !== 'undefined') {
         try {
@@ -133,6 +147,8 @@
           var obs = new PerformanceObserver(function(list) {
             list.getEntries().forEach(function(entry) {
               if (entry.name !== 'pointerdown') return;
+              // Bug 2 fix: disconnect only after processing, then restart
+              // profiler immediately so next pointerdown is covered
               obs.disconnect();
               state.eventObserver = null;
 
@@ -140,8 +156,10 @@
               var procTime = parseFloat((entry.processingEnd - entry.processingStart).toFixed(3));
 
               stopNativeProfiler().then(function(trace) {
+                // Restart profiler immediately so next interaction is covered
+                startNativeProfiler();
+
                 if (trace && trace.samples.length) {
-                  // Filter samples to this interaction's window
                   var filteredTrace = {
                     frames: trace.frames,
                     resources: trace.resources,
@@ -153,38 +171,21 @@
                   };
 
                   var trees = nativeTraceToCallTrees(filteredTrace, {});
-                  var latency = Math.round(performance.now() - nativeDownTime);
+                  // Use already-measured rAF latency (not re-measured after async stop)
+                  var latency = rafLatency !== null ? rafLatency :
+                    Math.round(performance.now() - nativeDownTime);
 
                   trees.forEach(function(t) {
                     t.name = 'interaction_native_' + nativeCount;
                     t.latencyMs = latency;
-                    // Prepend event timing info as first children
                     t.children.unshift(
-                      {
-                        name: 'event delay: ' + delay + 'ms',
-                        durationMs: delay,
-                        children: [],
-                      },
-                      {
-                        name: 'event processing: ' + procTime + 'ms',
-                        durationMs: procTime,
-                        children: [],
-                      },
-                      {
-                        name: 'first-rAF (latency)',
-                        durationMs: latency,
-                        children: [],
-                      }
+                      { name: 'event delay: ' + delay + 'ms', durationMs: delay, children: [] },
+                      { name: 'event processing: ' + procTime + 'ms', durationMs: procTime, children: [] },
+                      { name: 'first-rAF (latency)', durationMs: latency, children: [] }
                     );
                   });
 
                   state.callTrees = state.callTrees.concat(trees);
-                  state.latencySamples.push({
-                    ms: latency,
-                    pointerType: e.pointerType,
-                    timestamp: new Date().toISOString(),
-                    timeFromStart: parseFloat((nativeDownTime - state.startTime).toFixed(3)),
-                  });
                   updateHUD();
 
                   if (state.options.logToConsole) {
@@ -193,45 +194,33 @@
                       filteredTrace.samples.length);
                   }
                 }
-                startNativeProfiler();
               });
             });
           });
           obs.observe({ type: 'event', durationThreshold: 0, buffered: false });
           state.eventObserver = obs;
         } catch(err) {
-          // Fallback — no EventTiming support
           stopNativeProfiler().then(function(trace) {
+            startNativeProfiler();
             if (trace && trace.samples.length) {
               var trees = nativeTraceToCallTrees(trace, {});
               trees.forEach(function(t) { t.name = 'interaction_native_' + nativeCount; });
               state.callTrees = state.callTrees.concat(trees);
               updateHUD();
             }
-            startNativeProfiler();
           });
         }
       } else {
-        // No PerformanceObserver — simple stop and restart
         stopNativeProfiler().then(function(trace) {
+          startNativeProfiler();
           if (trace && trace.samples.length) {
             var trees = nativeTraceToCallTrees(trace, {});
             trees.forEach(function(t) { t.name = 'interaction_native_' + nativeCount; });
             state.callTrees = state.callTrees.concat(trees);
             updateHUD();
           }
-          startNativeProfiler();
         });
       }
-
-      // rAF latency always measured
-      var downTimeNative = state.pointerDownTime;
-      requestAnimationFrame(function() {
-        var latency = Math.round(performance.now() - downTimeNative);
-        if (state.options.logToConsole) console.log('[WebProfiler] latency (native): ' + latency + 'ms');
-        if (typeof state.options.onLatency === 'function') state.options.onLatency(latency);
-        updateHUD();
-      });
 
     } else {
       // ── MANUAL MODE ──────────────────────────────────────────
