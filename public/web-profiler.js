@@ -56,11 +56,21 @@
   }
   function clamp(v, mn, mx) { return Math.min(mx, Math.max(mn, v)); }
   function colorFor(ms) {
+    if (hudTheme === 'light') {
+      if (ms < 30) return '#0077cc';   // blue — readable on white
+      if (ms < 80) return '#cc6600';   // dark orange — readable on white
+      return '#cc0033';                // dark red
+    }
     if (ms < 30) return '#00e5ff';
     if (ms < 80) return '#ffb300';
     return '#ff3d71';
   }
   function fpsColor(fps) {
+    if (hudTheme === 'light') {
+      if (fps >= 50) return '#0077cc';
+      if (fps >= 30) return '#cc6600';
+      return '#cc0033';
+    }
     if (fps >= 50) return '#00e5ff';
     if (fps >= 30) return '#ffb300';
     return '#ff3d71';
@@ -496,12 +506,36 @@
 
   function applyTheme(el) {
     var t = getThemeVars();
+    var isDark = hudTheme === 'dark';
     el.style.background = t.bg;
     el.style.border = '1px solid ' + t.border;
     el.style.color = t.color;
-    // update muted labels
     el.querySelectorAll('[data-muted]').forEach(function (e) { e.style.color = t.muted; });
     el.querySelectorAll('[data-label]').forEach(function (e) { e.style.color = t.label; });
+
+    // Update accent colors for title and metric values
+    var titleEl = el.querySelector('#__wp_title__');
+    if (titleEl) {
+      var isNative = titleEl.textContent.indexOf('NATIVE') !== -1;
+      if (isNative) {
+        titleEl.style.color = isDark ? '#a8ff78' : '#1a7a1a';
+      } else {
+        titleEl.style.color = isDark ? '#00e5ff' : '#0077cc';
+      }
+    }
+
+    // Reset metric colors
+    ['#__wp_fps__', '#__wp_lat__', '#__wp_mem__'].forEach(function(id) {
+      var e = el.querySelector(id);
+      if (e) e.style.color = isDark ? '#00e5ff' : '#0077cc';
+    });
+
+    // STOP button
+    var stopBtn = el.querySelector('#__wp_stop__');
+    if (stopBtn) {
+      stopBtn.style.borderColor = isDark ? '#a8ff78' : '#1a7a1a';
+      stopBtn.style.color       = isDark ? '#a8ff78' : '#1a7a1a';
+    }
   }
 
   function createHUD() {
@@ -610,13 +644,17 @@
     el.querySelector('#__wp_theme__').addEventListener('click', function (e) {
       e.stopPropagation();
       hudTheme = hudTheme === 'dark' ? 'light' : 'dark';
-      var t2 = getThemeVars();
-      el.style.background = t2.bg;
-      el.style.border = '1px solid ' + t2.border;
-      el.style.color = t2.color;
-      el.querySelectorAll('[data-muted]').forEach(function (m) { m.style.color = t2.muted; });
+      applyTheme(el);
       el.querySelector('#__wp_theme__').textContent = hudTheme === 'dark' ? '☀' : '☾';
-      el.querySelector('#__wp_tree_panel__').style.borderTopColor = t2.border;
+      el.querySelector('#__wp_tree_panel__').style.borderTopColor = getThemeVars().border;
+      // Refresh title mode color and all metric colors
+      var titleEl = el.querySelector('#__wp_title__');
+      if (titleEl) {
+        var isNative = titleEl.textContent.indexOf('NATIVE') !== -1;
+        updateHUDMode(isNative ? 'native' : 'manual');
+      }
+      updateHUD();
+      renderLastTree();
     });
 
     makeDraggable(el);
@@ -638,10 +676,14 @@
       for (var i = 0; i < depth; i++) indent += '&nbsp;&nbsp;&nbsp;';
       var prefix = depth > 0 ? '└─ ' : '';
       var ms = node.durationMs !== null && node.durationMs !== undefined ? node.durationMs : '?';
-      var color = (typeof ms === 'number' && ms > 16) ? '#ffb300' : '#00e5ff';
+      var isDark = hudTheme === 'dark';
+      var color = (typeof ms === 'number' && ms > 16)
+        ? (isDark ? '#ffb300' : '#cc6600')
+        : (isDark ? '#00e5ff' : '#0077cc');
+      var mutedColor = isDark ? '#555570' : '#888899';
       return '<div>' + indent + prefix +
         '<span style="color:' + color + '">' + node.name + '</span>' +
-        '&nbsp;<span style="color:#555570">' + ms + 'ms</span>' +
+        '&nbsp;<span style="color:' + mutedColor + '">' + ms + 'ms</span>' +
         '</div>' +
         (node.children || []).map(function (c) { return renderNode(c, depth + 1); }).join('');
     }
@@ -666,7 +708,9 @@
         .sort(function (a, b) { return stats[b].calls - stats[a].calls; })
         .slice(0, 5)
         .map(function (m) {
-          var s = stats[m], c = s.avgMs > 1 ? '#ffb300' : '#555570';
+          var s = stats[m], c = s.avgMs > 1
+            ? (hudTheme === 'dark' ? '#ffb300' : '#cc6600')
+            : (hudTheme === 'dark' ? '#555570' : '#888899');
           return '<div style="display:flex;justify-content:space-between;font-size:9px">' +
             '<span style="color:#888">' + m + '</span>' +
             '<span style="color:' + c + '">' + s.avgMs + 'ms × ' + s.calls + '</span></div>';
@@ -841,13 +885,18 @@
     var titleEl = hud.querySelector('#__wp_title__');
     var stopBtn = hud.querySelector('#__wp_stop__');
     if (!titleEl) return;
+    var isDark = hudTheme === 'dark';
     if (mode === 'native') {
       titleEl.textContent = '⬡ WEB PROFILER [NATIVE]';
-      titleEl.style.color = '#a8ff78';
-      if (stopBtn) stopBtn.style.display = 'inline-block';
+      titleEl.style.color = isDark ? '#a8ff78' : '#1a7a1a';
+      if (stopBtn) {
+        stopBtn.style.display = 'inline-block';
+        stopBtn.style.borderColor = isDark ? '#a8ff78' : '#1a7a1a';
+        stopBtn.style.color = isDark ? '#a8ff78' : '#1a7a1a';
+      }
     } else {
       titleEl.textContent = '⬡ WEB PROFILER [MANUAL]';
-      titleEl.style.color = '#00e5ff';
+      titleEl.style.color = isDark ? '#00e5ff' : '#0077cc';
       if (stopBtn) stopBtn.style.display = 'none';
     }
   }
