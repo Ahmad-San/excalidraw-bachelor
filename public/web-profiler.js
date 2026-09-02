@@ -47,6 +47,7 @@
     currentTree: null,
     isDrawing: false,
     interactionCanvasCalls: [],
+    eventObserver: null,
   };
 
   function avg(arr) {
@@ -128,6 +129,63 @@
       }],
     };
 
+    // Native profiler: stop previous interaction's trace and restart
+    // so each interaction gets its own native call stack snapshot
+    if (nativeProfiler && !nativeProfiler.stopped) {
+      var prevTreeRef = state.callTrees.length > 0
+        ? state.callTrees[state.callTrees.length - 1]
+        : null;
+      stopNativeProfiler().then(function(trace) {
+        if (trace) {
+          var trees = nativeTraceToCallTrees(trace, {});
+          state.callTrees = state.callTrees.concat(trees);
+          updateHUD();
+          if (state.options.logToConsole) {
+            console.log('[WebProfiler] Native trace for interaction_' +
+              (state.interactionCount - 1) + ':', trees.length, 'groups,',
+              trace.samples.length, 'samples.');
+          }
+        }
+        // Restart native profiler for new interaction
+        startNativeProfiler();
+      });
+    }
+
+    // PerformanceObserver for event timing (manual mode supplement)
+    // Captures event processing duration from the browser's perspective
+    if (typeof PerformanceObserver !== 'undefined' && !nativeProfiler) {
+      try {
+        if (state.eventObserver) {
+          state.eventObserver.disconnect();
+          state.eventObserver = null;
+        }
+        var treeRefObs = state.currentTree;
+        var obs = new PerformanceObserver(function(list) {
+          list.getEntries().forEach(function(entry) {
+            if (entry.name === 'pointerdown' || entry.name === 'pointermove') {
+              if (treeRefObs) {
+                treeRefObs.children.push({
+                  name: 'event: ' + entry.name + ' (processingTime: ' +
+                    parseFloat(entry.processingEnd - entry.processingStart).toFixed(3) + 'ms)',
+                  durationMs: parseFloat(entry.duration.toFixed(3)),
+                  children: [],
+                });
+              }
+            }
+          });
+        });
+        obs.observe({ type: 'event', buffered: false });
+        state.eventObserver = obs;
+        if (state.options.logToConsole) {
+          console.log('[WebProfiler] PerformanceObserver (event) started.');
+        }
+      } catch(e) {
+        if (state.options.logToConsole) {
+          console.log('[WebProfiler] PerformanceObserver not supported:', e.message);
+        }
+      }
+    }
+
     // Capture per-interaction closure — avoids rafPending guard which
     // caused interactions fired in quick succession to skip latency
     // measurement entirely when the previous rAF hadn't fired yet.
@@ -174,7 +232,12 @@
 
     requestAnimationFrame(function () {
       requestAnimationFrame(function () {
-        // Now safe to stop capturing — final frame has rendered
+        // Disconnect PerformanceObserver for this interaction
+        if (state.eventObserver) {
+          state.eventObserver.disconnect();
+          state.eventObserver = null;
+        }
+
         state.isDrawing = false;
 
         var now = performance.now();
@@ -1194,6 +1257,7 @@
       state.latencySamples = []; state.memorySamples = []; state.callTrees = [];
       state.interactionCount = 0;
       state.currentTree = null; state.interactionCanvasCalls = []; state.isDrawing = false;
+      if (state.eventObserver) { state.eventObserver.disconnect(); state.eventObserver = null; }
       Object.keys(state.canvasTimings).forEach(function (k) { state.canvasTimings[k] = []; });
       state.startTime = performance.now();
       if (hud) {
