@@ -629,6 +629,7 @@
       e.stopPropagation();
       WebProfiler.stopNative().then(function () {
         el.querySelector('#__wp_stop__').style.display = 'none';
+        updateHUDMode('manual'); // switch title back to MANUAL
       });
     });
 
@@ -804,9 +805,24 @@
                     }),
                   };
 
-                  var trees = nativeTraceToCallTrees(filteredTrace, {});
                   var latency = meta.rafLatency !== null ? meta.rafLatency :
                     Math.round(performance.now() - meta.downTime);
+
+                  var trees = nativeTraceToCallTrees(filteredTrace, {});
+
+                  // Always create at least one tree node — even with no samples
+                  // so HUD always updates after every interaction
+                  if (!trees.length) {
+                    trees = [{
+                      name: 'interaction_native_' + meta.count,
+                      pointerType: meta.pointerType,
+                      startMs: meta.downTime,
+                      endMs: meta.downTime + latency,
+                      durationMs: latency,
+                      latencyMs: latency,
+                      children: [],
+                    }];
+                  }
 
                   trees.forEach(function(t) {
                     t.name = 'interaction_native_' + meta.count;
@@ -1147,18 +1163,21 @@
       }
       var trace = await stopNativeProfiler();
       if (trace) {
-        // Show resolving status in HUD
         var status = hud ? hud.querySelector('#__wp_status__') : null;
         if (status) status.textContent = 'resolving names via source maps…';
 
-        // Try to resolve minified names via source maps
         var nameMap = await resolveFrameNames(trace);
         var resolved = Object.keys(nameMap).filter(function(k){ return nameMap[k] !== k; }).length;
         if (state.options.logToConsole) console.log('[WebProfiler] Resolved ' + resolved + ' function names.');
 
         var trees = nativeTraceToCallTrees(trace, nameMap);
         state.callTrees = state.callTrees.concat(trees);
+
+        // Switch HUD to MANUAL since native profiler is now stopped
+        nativeProfiler = null;
+        updateHUDMode('manual');
         updateHUD();
+
         if (state.options.logToConsole) {
           console.log('[WebProfiler] Native trace merged:', trees.length, 'interactions.');
         }
