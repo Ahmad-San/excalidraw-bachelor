@@ -1,23 +1,63 @@
 /**
  * web-profiler.js
  * ─────────────────────────────────────────────────────────────
- * Lightweight web profiler for constrained browsers (Tizen 5.2+)
- * No dependencies. Single file drop-in.
+ * Lightweight drop-in performance profiler for web applications,
+ * designed for constrained browser environments (e.g. Tizen 5.2+)
+ * where Chrome DevTools and similar tools are unavailable.
  *
- * Measures:
- *  1. Input latency  — pointerdown → first requestAnimationFrame
- *  2. FPS            — frames per second
- *  3. Canvas timing  — how long each canvas API call takes
- *  4. Memory         — JS heap size
- *  5. Call tree      — pointerdown → rAF → canvas calls
+ * FEATURES:
+ *  1. Input latency     — pointerdown → first requestAnimationFrame delta
+ *  2. FPS               — frames per second via rAF loop
+ *  3. Canvas API timing — execution time of each CanvasRenderingContext2D call
+ *  4. DOM mutations     — counts DOM changes per interaction (childList, attrs, text)
+ *  5. Long Tasks        — JS tasks >50ms that block the main thread
+ *  6. Memory            — JS heap size sampled every 2s
+ *  7. Call tree         — per-interaction hierarchy of all above metrics
+ *  8. Native profiling  — JS Self-Profiling API (Chrome 94+) with EventTiming
  *
- * EXPORTS:
- *  - exportCSV()        — CSV with all data sections
- *  - exportFirefox()    — Firefox Profiler JSON (drag into profiler.firefox.com)
+ * BROWSER SUPPORT:
+ *  - Tizen 5.2+ (Samsung Smart Signage) — manual mode (1-6)
+ *  - Chrome 94+ / Edge 94+              — native mode (7-8) + manual (1-6)
+ *  - Firefox                            — manual mode (1-6), no native profiling
  *
  * USAGE:
  *   <script src="web-profiler.js"></script>
- *   <script> WebProfiler.init({ logToConsole: true }); </script>
+ *   <script>WebProfiler.init({ logToConsole: true });</script>
+ *
+ * OPTIONS (passed to init):
+ *   logToConsole    {boolean} — print measurements to console (default: false)
+ *   overlay         {boolean} — show floating HUD (default: true)
+ *   wrapCanvas      {boolean} — instrument Canvas API (default: true)
+ *   trackDOM        {boolean} — track DOM mutations (default: true)
+ *   trackLongTasks  {boolean} — track long tasks >50ms (default: true)
+ *   trackMemory     {boolean} — sample JS heap size (default: true)
+ *   useNativeProfiler {boolean} — use JS Self-Profiling API if available (default: true)
+ *   stylusOnly      {boolean} — only track stylus input, ignore mouse (default: false)
+ *   onLatency       {function} — callback(ms) on each latency measurement
+ *
+ * PUBLIC API:
+ *   WebProfiler.init(options)       — start profiling
+ *   WebProfiler.exportCSV()         — download all data as CSV
+ *   WebProfiler.exportFirefox()     — download Firefox Profiler JSON
+ *   WebProfiler.openInFirefoxProfiler() — upload and open in profiler.firefox.com
+ *   WebProfiler.getLatencyStats()   — { avg, min, max, count, samples }
+ *   WebProfiler.getCanvasStats()    — per-method timing stats
+ *   WebProfiler.getCallTrees()      — all recorded interaction trees
+ *   WebProfiler.getLongTasks()      — all recorded long tasks
+ *   WebProfiler.getFPS()            — current FPS
+ *   WebProfiler.getMemoryStats()    — { avgMB, maxMB, samples }
+ *   WebProfiler.clear()             — reset all collected data
+ *   WebProfiler.destroy()           — remove profiler and all listeners
+ *   WebProfiler.stopNative()        — stop JS Self-Profiling API session
+ *   WebProfiler.getMode()           — 'native' or 'manual'
+ *
+ * EXPORTS:
+ *   window.WebProfiler — global object exposing the public API
+ *
+ * FUTURE IMPROVEMENTS:
+ *   - Source map resolution for minified native profiler function names
+ *   - fetch/XHR tracking for network-heavy applications
+ *   - npm package + CDN distribution
  * ─────────────────────────────────────────────────────────────
  */
 
@@ -83,6 +123,14 @@
     'drawImage', 'putImageData', 'clearRect', 'fillRect',
   ];
 
+  // ── Canvas API Instrumentation ───────────────────────────────
+  // Uses Monkey Patching to wrap each CanvasRenderingContext2D method:
+  // the original method is saved, replaced with a wrapper that measures
+  // execution time via performance.now(), then calls the original.
+  // This is transparent to the target application — it continues calling
+  // the same method names and receives the same return values.
+  // Canvas calls are collected per interaction in state.interactionCanvasCalls
+  // and grouped into the call tree on pointerup.
   function wrapCanvasAPI() {
     var proto = CanvasRenderingContext2D.prototype;
     CANVAS_METHODS.forEach(function (method) {
@@ -118,6 +166,13 @@
     return result;
   }
 
+  // ── Input Event Handlers ─────────────────────────────────────
+  // onPointerDown starts a new interaction tree and schedules a
+  // requestAnimationFrame callback to measure input-to-render latency.
+  // A per-interaction closure (treeRef, downTime) is used instead of
+  // shared state so that rapid successive interactions each get their
+  // own independent latency measurement — avoiding the rafPending guard
+  // that would have skipped measurements for fast interactions.
   function onPointerDown(e) {
     if (state.options.stylusOnly && e.pointerType === 'mouse') return;
     // #9 — ignore touches/clicks within the HUD itself
@@ -202,6 +257,14 @@
     }
   }
 
+  // onPointerUp closes the current interaction tree.
+  // Two requestAnimationFrame cycles are waited before closing:
+  // Excalidraw (and similar apps) render their final frame AFTER
+  // pointerup fires, so canvas calls continue arriving after the event.
+  // Waiting two rAF cycles ensures all post-pointerup canvas calls
+  // are captured before the tree is finalized and pushed to callTrees.
+  // state.currentTree is nulled immediately so the next interaction
+  // can start without waiting for the two rAF cycles to complete.
   function onPointerUp() {
     if (!state.isDrawing || !state.currentTree) return;
 
@@ -400,6 +463,21 @@
     }, 2000);
   }
 
+  // ── Firefox Profiler Export ───────────────────────────────────
+  // Builds a JSON object in the Firefox Profiler preprocessed format
+  // (preprocessedProfileVersion: 47). The format uses parallel arrays
+  // for performance — funcTable, frameTable, stackTable, samples and
+  // markers each store their fields as separate arrays indexed by position.
+  //
+  // Call trees are converted to stack samples via processNode() which
+  // recursively builds the stackTable by linking each frame to its parent.
+  // Markers use the RawMarkerTable format with startTime/endTime fields
+  // (not the legacy schema+data format) which Firefox Profiler requires
+  // for the Marker Chart and Marker Table views.
+  //
+  // The exported profile can be:
+  //  - Dragged into profiler.firefox.com (FFX button)
+  //  - Uploaded via the official compressed-store API (OPEN button)
   function buildFirefoxProfile() {
     var stringTable = [];
     var stringMap = {};
@@ -520,6 +598,14 @@
       return idx;
     }
 
+    // processNode recursively converts a call tree node into Firefox Profiler
+    // stack samples. Each node creates one stack entry (funcTable → frameTable
+    // → stackTable chain) and one sample in samples.time[]/weight[].
+    // Children are spread across the parent's time range using equal slices
+    // (nodeDur / children.length) so they appear as distinct entries in the
+    // Stack Chart. A closing sample with weight:0 is added after all children
+    // to prevent the last child's visual bar from bleeding into the next
+    // interaction's gap in the Stack Chart.
     function processNode(node, parentStackIdx, timeOffset) {
       var funcIdx = getOrCreateFunc(node.name);
       var frameIdx = getOrCreateFrame(funcIdx);
@@ -947,7 +1033,7 @@
                 if (trace && trace.samples.length) {
                   // No filter needed — profiler was restarted at previous pointerdown
                   // so all samples in this trace belong to this interaction
-                  var trees = nativeTraceToCallTrees(trace, {});
+                  var trees = nativeTraceToCallTrees(trace);
                   var latency = meta.rafLatency !== null ? meta.rafLatency :
                     Math.round(performance.now() - meta.downTime);
 
@@ -1044,165 +1130,21 @@
     }
   }
 
-  // ── Source Map Resolution (built-in, no dependencies) ────────
-  // Implements a minimal VLQ source map decoder directly — no CDN,
-  // no WASM, no external dependencies. Works everywhere including
-  // Tizen 5.2 and Edge with tracking prevention enabled.
-
-  var sourceMapCache = {}; // cache of parsed consumers per script URL
-
-  // Base64 VLQ decoder — implements the source map spec
-  var B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-  var B64_MAP = {};
-  for (var _i = 0; _i < B64.length; _i++) B64_MAP[B64[_i]] = _i;
-
-  function decodeVLQ(str, pos) {
-    var result = 0, shift = 0, digit, cont;
-    do {
-      digit = B64_MAP[str[pos++]];
-      cont  = digit & 32;
-      digit &= 31;
-      result += digit << shift;
-      shift  += 5;
-    } while (cont);
-    return { value: (result & 1) ? -(result >> 1) : (result >> 1), pos: pos };
-  }
-
-  // Parse a source map JSON into a lookup structure
-  // Returns a function: (line, column) → { name, source }
-  function parseSourceMap(mapJson) {
-    var names   = mapJson.names   || [];
-    var sources = mapJson.sources || [];
-    var mappings = mapJson.mappings || '';
-
-    // Parse all mappings into a sorted array
-    var segments = [];
-    var genLine = 0;
-    var srcFile = 0, srcLine = 0, srcCol = 0, nameIdx = 0;
-
-    var lines = mappings.split(';');
-    for (var li = 0; li < lines.length; li++) {
-      genLine = li;
-      var genCol = 0;
-      var parts = lines[li].split(',');
-      for (var pi = 0; pi < parts.length; pi++) {
-        var seg = parts[pi];
-        if (!seg) continue;
-        var pos = 0;
-        var r;
-
-        r = decodeVLQ(seg, pos); genCol  += r.value; pos = r.pos;
-        if (pos >= seg.length) continue;
-        r = decodeVLQ(seg, pos); srcFile += r.value; pos = r.pos;
-        if (pos >= seg.length) continue;
-        r = decodeVLQ(seg, pos); srcLine += r.value; pos = r.pos;
-        if (pos >= seg.length) continue;
-        r = decodeVLQ(seg, pos); srcCol  += r.value; pos = r.pos;
-
-        var nameIndex = -1;
-        if (pos < seg.length) {
-          r = decodeVLQ(seg, pos); nameIdx += r.value;
-          nameIndex = nameIdx;
-        }
-
-        segments.push({
-          gl: genLine, gc: genCol,
-          name: nameIndex >= 0 ? names[nameIndex] : null,
-          source: sources[srcFile] || null,
-        });
-      }
-    }
-
-    // Lookup: find closest segment for a given generated line/column
-    return function lookup(line, column) {
-      // line is 1-based in profiler, 0-based in source map
-      var targetLine = line - 1;
-      var best = null;
-      for (var i = 0; i < segments.length; i++) {
-        var s = segments[i];
-        if (s.gl === targetLine && s.gc <= column) {
-          if (!best || s.gc > best.gc) best = s;
-        }
-      }
-      return best;
-    };
-  }
-
-  // Fetch and parse a source map for a script URL
-  async function getSourceMapLookup(scriptUrl) {
-    if (sourceMapCache[scriptUrl]) return sourceMapCache[scriptUrl];
-    try {
-      var jsRes  = await fetch(scriptUrl);
-      var jsText = await jsRes.text();
-      var match  = jsText.match(/\/\/# sourceMappingURL=(.+)$/m);
-      if (!match) return null;
-
-      var mapUrl = match[1].startsWith('http')
-        ? match[1]
-        : new URL(match[1], scriptUrl).href;
-
-      var mapRes  = await fetch(mapUrl);
-      var mapJson = await mapRes.json();
-      var lookup  = parseSourceMap(mapJson);
-      sourceMapCache[scriptUrl] = lookup;
-      if (state.options.logToConsole) console.log('[WebProfiler] Source map parsed:', mapUrl);
-      return lookup;
-    } catch(e) {
-      if (state.options.logToConsole) console.warn('[WebProfiler] Source map fetch failed:', scriptUrl, e.message);
-      return null;
-    }
-  }
-
-  // Resolve all frame names in a native profiler trace
-  // Returns { minifiedName → realName }
-  async function resolveFrameNames(trace) {
-    var resolved = {};
-    if (!trace || !trace.frames) return resolved;
-
-    try {
-      // Build script URL map from resourceId
-      var scripts = {};
-      if (trace.resources) {
-        trace.resources.forEach(function(url, i) { scripts[i] = url; });
-      }
-
-      // Group frames by script
-      var byScript = {};
-      trace.frames.forEach(function(frame) {
-        if (!frame || frame.line === undefined || frame.column === undefined) return;
-        var url = scripts[frame.resourceId];
-        if (!url) return;
-        if (!byScript[url]) byScript[url] = [];
-        byScript[url].push(frame);
-      });
-
-      // Resolve each script's frames
-      await Promise.all(Object.keys(byScript).map(async function(scriptUrl) {
-        var lookup = await getSourceMapLookup(scriptUrl);
-        if (!lookup) return;
-
-        byScript[scriptUrl].forEach(function(frame) {
-          var result = lookup(frame.line, frame.column);
-          var realName = (result && result.name) ? result.name : frame.name;
-          resolved[frame.name] = realName;
-          if (state.options.logToConsole && realName !== frame.name) {
-            console.log('[WebProfiler] ' + frame.name + ' → ' + realName);
-          }
-        });
-      }));
-
-    } catch(e) {
-      if (state.options.logToConsole) console.warn('[WebProfiler] Resolution failed:', e.message);
-    }
-
-    return resolved;
-  }
-
-  // Convert native Profiler trace into our callTree format
-  // so it works with the existing Firefox export and HUD
-  function nativeTraceToCallTrees(trace, nameMap) {
+  // ── Native Trace Conversion ───────────────────────────────────
+  // Converts a JS Self-Profiling API trace into our callTree format
+  // so it integrates with the HUD tree view and Firefox Profiler export.
+  //
+  // The native trace contains:
+  //   samples[]  — {timestamp, stackId} one per sample interval (10ms)
+  //   stacks[]   — {frameId, parentId} linked list forming call stack
+  //   frames[]   — {name, resourceId, line, column} function info
+  //
+  // Samples are grouped into interactions by time gaps >500ms.
+  // For each interaction, the top-10 most frequent functions are
+  // extracted and shown as children with (N samples) annotations.
+  // Duration is estimated as sampleCount × sampleInterval (10ms).
+  function nativeTraceToCallTrees(trace) {
     if (!trace || !trace.samples.length) return [];
-    nameMap = nameMap || {};
 
     // Build a map of stackId → full call path
     function resolveStack(stackId) {
@@ -1211,8 +1153,7 @@
       if (!stack) return [];
       var parent = resolveStack(stack.parentId);
       var frame  = trace.frames[stack.frameId];
-      var rawName = frame ? (frame.name || 'anonymous') : 'unknown';
-      var name = nameMap[rawName] || rawName; // use resolved name if available
+      var name   = frame ? (frame.name || 'anonymous') : 'unknown';
       return parent.concat([name]);
     }
 
@@ -1353,14 +1294,7 @@
       }
       var trace = await stopNativeProfiler();
       if (trace) {
-        var status = hud ? hud.querySelector('#__wp_status__') : null;
-        if (status) status.textContent = 'resolving names via source maps…';
-
-        var nameMap = await resolveFrameNames(trace);
-        var resolved = Object.keys(nameMap).filter(function(k){ return nameMap[k] !== k; }).length;
-        if (state.options.logToConsole) console.log('[WebProfiler] Resolved ' + resolved + ' function names.');
-
-        var trees = nativeTraceToCallTrees(trace, nameMap);
+        var trees = nativeTraceToCallTrees(trace);
         state.callTrees = state.callTrees.concat(trees);
 
         // Switch HUD to MANUAL since native profiler is now stopped
