@@ -16,7 +16,7 @@
  *  8. Native profiling  — JS Self-Profiling API (Chrome 94+) with EventTiming
  *
  * BROWSER SUPPORT:
- *  - Tizen 5.2+ (Samsung Smart Signage) — manual mode (1-6)
+ *  - Constrained browsers (e.g. Tizen 5.2+) — manual mode (1-6)
  *  - Chrome 94+ / Edge 94+              — native mode (7-8) + manual (1-6)
  *  - Firefox                            — manual mode (1-6), no native profiling
  *
@@ -259,7 +259,7 @@
 
   // onPointerUp closes the current interaction tree.
   // Two requestAnimationFrame cycles are waited before closing:
-  // Excalidraw (and similar apps) render their final frame AFTER
+  // canvas-based applications typically render their final frame AFTER
   // pointerup fires, so canvas calls continue arriving after the event.
   // Waiting two rAF cycles ensures all post-pointerup canvas calls
   // are captured before the tree is finalized and pushed to callTrees.
@@ -268,7 +268,7 @@
   function onPointerUp() {
     if (!state.isDrawing || !state.currentTree) return;
 
-    // Capture refs before nulling — Excalidraw renders its final frame
+    // Capture refs before nulling — canvas apps render their final frame
     // AFTER pointerup fires, so we keep isDrawing=true and currentTree
     // alive until those canvas calls land, then close the tree.
     var treeRef = state.currentTree;
@@ -409,7 +409,7 @@
   // ── Long Task Tracking ───────────────────────────────────────
   // Long Tasks are JS tasks > 50ms that block the main thread.
   // These are a key cause of jank and input latency.
-  // Works on Chrome/Edge — not available on Firefox or Tizen.
+  // Works on Chrome/Edge — not available on all browsers.
 
   var longTaskObserver = null;
   var longTasks = [];
@@ -669,7 +669,7 @@
         interval: 1,
         startTime: baseTime,
         processType: 0,
-        product: 'WebProfiler (Excalidraw / Tizen)',
+        product: 'WebProfiler',
         stackwalk: 0,
         version: 24,
         preprocessedProfileVersion: 47,
@@ -690,7 +690,7 @@
           registerTime: 0,
           unregisterTime: null,
           pausedRanges: [],
-          name: 'Main Thread (Excalidraw)',
+          name: 'Main Thread',
           isMainThread: true,
           pid: '1',
           tid: '1',
@@ -985,7 +985,7 @@
   // ── JS Self-Profiling API (Chrome 94+ / Edge 94+) ───────────
   // If the browser supports the native Profiler API, we use it
   // to capture REAL JS call stacks automatically — no manual wrapping.
-  // On old browsers (Tizen 5.2), it's not available so we fall back
+  // On browsers without support, it falls back to manual instrumentation.
   // to our manual canvas wrapping approach.
   //
   // The native API requires:
@@ -1212,6 +1212,10 @@
 
   var WebProfiler = {
 
+    // ── Public API ────────────────────────────────────────────────
+    // init() starts the profiler. Call once after the page loads.
+    // All options are optional — defaults are suitable for most cases.
+    // Returns the WebProfiler object for chaining.
     init: function (options) {
       if (state.active) return this;
       state.options = Object.assign({
