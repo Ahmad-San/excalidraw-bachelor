@@ -89,6 +89,7 @@
     interactionCanvasCalls: [],
     eventObserver: null,
     nativeInteractionMeta: null,
+    lastCompletedTree: null,
   };
 
   function avg(arr) {
@@ -307,6 +308,7 @@
           });
         }
 
+        state.lastCompletedTree = treeRef;
         state.callTrees.push(treeRef);
         updateHUD();
       });
@@ -1252,27 +1254,33 @@
       // Update HUD mode AFTER hud is created
       if (nativeProfiler) updateHUDMode('native');
 
-      // Persistent PerformanceObserver for MANUAL mode event timing
-      // Started here (not in onPointerDown) so it catches every pointerdown
-      if (!nativeProfiler && typeof PerformanceObserver !== 'undefined') {
+      // Persistent PerformanceObserver for event timing — started always
+      // regardless of mode so event delay/processing appear in both
+      // native and manual call trees
+      if (typeof PerformanceObserver !== 'undefined') {
         try {
           var manualObs = new PerformanceObserver(function(list) {
             list.getEntries().forEach(function(entry) {
               if (entry.name !== 'pointerdown') return;
-              // Observer fires after the interaction is complete
-              // so currentTree is null — use the last pushed callTree instead
-              var lastTree = state.callTrees[state.callTrees.length - 1];
-              if (!lastTree) return;
               var delay    = parseFloat((entry.processingStart - entry.startTime).toFixed(3));
               var procTime = parseFloat((entry.processingEnd - entry.processingStart).toFixed(3));
-              // Insert at beginning of children so it appears before rAF and canvas
-              lastTree.children.unshift(
+
+              // Observer fires after pointerdown is processed but the tree
+              // may not be in callTrees yet (waiting for two rAF cycles).
+              // Use state.lastCompletedTree which is set just before push,
+              // or fall back to callTrees[last] if already pushed.
+              var targetTree = state.lastCompletedTree ||
+                state.callTrees[state.callTrees.length - 1];
+              if (!targetTree) return;
+
+              targetTree.children.unshift(
                 { name: 'event processing: ' + procTime + 'ms', durationMs: procTime, children: [] },
                 { name: 'event delay: ' + delay + 'ms', durationMs: delay, children: [] }
               );
               updateHUD();
               if (state.options.logToConsole) {
-                console.log('[WebProfiler] event delay: ' + delay + 'ms, processing: ' + procTime + 'ms');
+                console.log('[WebProfiler] event delay: ' + delay +
+                  'ms, processing: ' + procTime + 'ms');
               }
             });
           });
@@ -1485,6 +1493,7 @@
     clear: function () {
       state.latencySamples = []; state.memorySamples = []; state.callTrees = [];
       state.interactionCount = 0;
+      state.lastCompletedTree = null;
       longTasks = [];
       state.currentTree = null; state.interactionCanvasCalls = []; state.isDrawing = false;
       Object.keys(state.canvasTimings).forEach(function (k) { state.canvasTimings[k] = []; });
