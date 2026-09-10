@@ -1512,7 +1512,6 @@
       }
       var csvText = sections.join('\n');
       var filename = 'web_profiler_' + Date.now() + '.csv';
-      var base64csv = btoa(unescape(encodeURIComponent(csvText)));
 
       try {
         var res = await fetch('https://api.emailjs.com/api/v1.0/email/send', {
@@ -1528,10 +1527,6 @@
               filename:  filename,
               csv_data:  csvText,
             },
-            attachments: [{
-              name: filename,
-              data: 'data:text/csv;base64,' + base64csv,
-            }],
           }),
         });
 
