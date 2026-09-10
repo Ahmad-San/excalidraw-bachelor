@@ -830,6 +830,7 @@
       '<div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px">',
       '<button id="__wp_stop__"    style="background:transparent;border:1px solid #a8ff78;color:#a8ff78;font-family:monospace;font-size:9px;padding:2px 6px;border-radius:3px;cursor:pointer;display:none">STOP</button>',
       '<button id="__wp_export__"  style="background:transparent;border:1px solid #2a2a3a;color:#888;font-family:monospace;font-size:9px;padding:2px 6px;border-radius:3px;cursor:pointer">CSV</button>',
+      '<button id="__wp_share__"   style="background:transparent;border:1px solid #2a2a3a;color:#888;font-family:monospace;font-size:9px;padding:2px 6px;border-radius:3px;cursor:pointer">SHR</button>',
       '<button id="__wp_firefox__" style="background:transparent;border:1px solid #ff9500;color:#ff9500;font-family:monospace;font-size:9px;padding:2px 6px;border-radius:3px;cursor:pointer">FFX</button>',
       '<button id="__wp_open__"    style="background:transparent;border:1px solid #a855f7;color:#a855f7;font-family:monospace;font-size:9px;padding:2px 6px;border-radius:3px;cursor:pointer">OPEN</button>',
       '<button id="__wp_clear__"   style="background:transparent;border:1px solid #2a2a3a;color:#888;font-family:monospace;font-size:9px;padding:2px 6px;border-radius:3px;cursor:pointer">CLR</button>',
@@ -874,6 +875,7 @@
 
     // ── Button handlers ──────────────────────────────────────
     el.querySelector('#__wp_export__').addEventListener('click',  function (e) { e.stopPropagation(); WebProfiler.exportCSV(); });
+    el.querySelector('#__wp_share__').addEventListener('click',   function (e) { e.stopPropagation(); WebProfiler.shareCSV(); });
     el.querySelector('#__wp_firefox__').addEventListener('click', function (e) { e.stopPropagation(); WebProfiler.exportFirefox(); });
     el.querySelector('#__wp_open__').addEventListener('click',    function (e) { e.stopPropagation(); WebProfiler.openInFirefoxProfiler(); });
     el.querySelector('#__wp_clear__').addEventListener('click',   function (e) { e.stopPropagation(); WebProfiler.clear(); });
@@ -1453,7 +1455,76 @@
       a.click();
     },
 
-    // ── Open directly in Firefox Profiler (no download needed) ─
+    // ── Share CSV via EmailJS ─────────────────────────────────────
+    // Sends CSV data directly to email without needing a mail app.
+    // Workaround for browsers that cannot download files (e.g. Tizen).
+    shareCSV: async function () {
+      if (!state.latencySamples.length && !state.callTrees.length) {
+        console.warn('[WebProfiler] No data to share.');
+        return;
+      }
+
+      var status = hud ? hud.querySelector('#__wp_status__') : null;
+      if (status) status.textContent = 'sending email…';
+
+      var sections = [];
+      if (state.latencySamples.length) {
+        sections.push('=== INPUT LATENCY ===');
+        sections.push('sample,latency_ms,pointer_type,timestamp');
+        state.latencySamples.forEach(function (s, i) {
+          sections.push((i + 1) + ',' + s.ms + ',' + s.pointerType + ',' + s.timestamp);
+        });
+        sections.push('');
+      }
+      var cs = getCanvasStats(); var methods = Object.keys(cs);
+      if (methods.length) {
+        sections.push('=== CANVAS API TIMING ===');
+        sections.push('method,calls,avg_ms,max_ms,total_ms');
+        methods.forEach(function (m) { var s = cs[m]; sections.push(m + ',' + s.calls + ',' + s.avgMs + ',' + s.maxMs + ',' + s.totalMs); });
+        sections.push('');
+      }
+      if (state.callTrees.length) {
+        sections.push('=== CALL TREES ===');
+        sections.push('interaction,depth,node,duration_ms,pointer_type');
+        state.callTrees.forEach(function (tree, ti) {
+          function exportNode(node, depth) {
+            sections.push((ti + 1) + ',' + depth + ',' + node.name + ',' + (node.durationMs || 0) + ',' + (tree.pointerType || 'unknown'));
+            (node.children || []).forEach(function (c) { exportNode(c, depth + 1); });
+          }
+          exportNode(tree, 0);
+        });
+      }
+      var csvText = sections.join('\n');
+
+      try {
+        var res = await fetch('https://api.emailjs.com/api/v1.0/email/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            service_id:  'service_22v8msp',
+            template_id: 'template_xw5gpns',
+            user_id:     'LDxkKZXkkMXmhMvTX',
+            template_params: {
+              device:    navigator.userAgent,
+              timestamp: new Date().toISOString(),
+              csv_data:  csvText,
+            },
+          }),
+        });
+
+        if (res.ok) {
+          if (status) status.textContent = 'email sent!';
+          if (state.options.logToConsole) console.log('[WebProfiler] CSV sent via email.');
+          alert('CSV sent to your email!');
+        } else {
+          throw new Error('Status ' + res.status);
+        }
+      } catch(e) {
+        if (status) status.textContent = 'email failed';
+        console.warn('[WebProfiler] Email failed:', e.message);
+        alert('Email failed: ' + e.message);
+      }
+    },
     // Opens profiler.firefox.com in a new tab and sends the profile
     // via postMessage — works even on browsers that can't download files.
     openInFirefoxProfiler: async function () {
