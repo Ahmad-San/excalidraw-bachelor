@@ -1494,7 +1494,25 @@
           exportNode(tree, 0);
         });
       }
+      if (state.memorySamples.length) {
+        sections.push('=== MEMORY ===');
+        sections.push('sample,used_mb,total_mb,timestamp');
+        state.memorySamples.forEach(function (s, i) {
+          sections.push((i + 1) + ',' + s.usedMB + ',' + s.totalMB + ',' + s.timestamp);
+        });
+        sections.push('');
+      }
+      if (longTasks.length) {
+        sections.push('=== LONG TASKS ===');
+        sections.push('sample,start_ms,duration_ms,timestamp');
+        longTasks.forEach(function(t, i) {
+          sections.push((i + 1) + ',' + t.startTime + ',' + t.duration + ',' + t.timestamp);
+        });
+        sections.push('');
+      }
       var csvText = sections.join('\n');
+      var filename = 'web_profiler_' + Date.now() + '.csv';
+      var base64csv = btoa(unescape(encodeURIComponent(csvText)));
 
       try {
         var res = await fetch('https://api.emailjs.com/api/v1.0/email/send', {
@@ -1507,8 +1525,13 @@
             template_params: {
               device:    navigator.userAgent,
               timestamp: new Date().toISOString(),
+              filename:  filename,
               csv_data:  csvText,
             },
+            attachments: [{
+              name: filename,
+              data: 'data:text/csv;base64,' + base64csv,
+            }],
           }),
         });
 
