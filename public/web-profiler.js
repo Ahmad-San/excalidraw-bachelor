@@ -90,6 +90,7 @@
     eventObserver: null,
     nativeInteractionMeta: null,
     lastCompletedTree: null,
+    currentDOMMutations: null,
   };
 
   function avg(arr) {
@@ -187,6 +188,7 @@
       // stopping/restarting the native profiler and building trees.
       // Here we only measure rAF latency and update interaction metadata.
       state.isDrawing = false;
+      state.currentDOMMutations = { _childList: 0, _attributes: 0, _characters: 0 };
       state.nativeInteractionMeta = {
         count: state.interactionCount,
         downTime: state.pointerDownTime,
@@ -339,7 +341,19 @@
     if (typeof MutationObserver === 'undefined') return;
     try {
       domObserver = new MutationObserver(function(mutations) {
-        if (!state.isDrawing || !state.currentTree) return;
+        // Work in both modes:
+        // MANUAL: use state.currentTree directly
+        // NATIVE: use state.nativeInteractionMeta to find active interaction
+        var targetTree = state.currentTree ||
+          (state.nativeInteractionMeta ? null : state.lastCompletedTree);
+
+        // In native mode, we don't have currentTree so we attach to
+        // the tree being built via nativeInteractionMeta
+        var isNativeActive = nativeProfiler && !nativeProfiler.stopped &&
+          state.nativeInteractionMeta;
+
+        if (!state.currentTree && !isNativeActive) return;
+
         var childListCount  = 0;
         var attributeCount  = 0;
         var characterCount  = 0;
@@ -353,41 +367,52 @@
         var total = childListCount + attributeCount + characterCount;
         if (!total) return;
 
-        // Find or create the DOM mutations node in current tree
-        var domNode = null;
-        for (var i = 0; i < state.currentTree.children.length; i++) {
-          if (state.currentTree.children[i]._isDOMNode) {
-            domNode = state.currentTree.children[i];
-            break;
-          }
-        }
-        if (!domNode) {
-          domNode = {
-            name: 'DOM mutations',
-            durationMs: null,
-            children: [],
-            _isDOMNode: true,
-            _childList: 0,
-            _attributes: 0,
-            _characters: 0,
+        // Store DOM mutation counts in state for native mode to pick up
+        // when building the tree after stopNativeProfiler()
+        if (!state.currentDOMMutations) {
+          state.currentDOMMutations = {
+            _childList: 0, _attributes: 0, _characters: 0
           };
-          state.currentTree.children.push(domNode);
         }
+        state.currentDOMMutations._childList  += childListCount;
+        state.currentDOMMutations._attributes += attributeCount;
+        state.currentDOMMutations._characters += characterCount;
 
-        domNode._childList  += childListCount;
-        domNode._attributes += attributeCount;
-        domNode._characters += characterCount;
-        var totalMutations   = domNode._childList + domNode._attributes + domNode._characters;
-        domNode.name = 'DOM mutations ×' + totalMutations +
-          ' (nodes:' + domNode._childList +
-          ' attrs:' + domNode._attributes +
-          ' text:' + domNode._characters + ')';
-        // Update duration — time from pointerdown to last mutation
-        // This tells us how long the DOM kept changing after the input
-        if (state.pointerDownTime) {
-          domNode.durationMs = parseFloat(
-            (performance.now() - state.pointerDownTime).toFixed(3)
-          );
+        // For manual mode — insert directly into currentTree
+        if (state.currentTree) {
+          var domNode = null;
+          for (var i = 0; i < state.currentTree.children.length; i++) {
+            if (state.currentTree.children[i]._isDOMNode) {
+              domNode = state.currentTree.children[i];
+              break;
+            }
+          }
+          if (!domNode) {
+            domNode = {
+              name: 'DOM mutations',
+              durationMs: null,
+              children: [],
+              _isDOMNode: true,
+              _childList: 0,
+              _attributes: 0,
+              _characters: 0,
+            };
+            state.currentTree.children.push(domNode);
+          }
+
+          domNode._childList  += childListCount;
+          domNode._attributes += attributeCount;
+          domNode._characters += characterCount;
+          var totalMutations   = domNode._childList + domNode._attributes + domNode._characters;
+          domNode.name = 'DOM mutations \u00d7' + totalMutations +
+            ' (nodes:' + domNode._childList +
+            ' attrs:' + domNode._attributes +
+            ' text:' + domNode._characters + ')';
+          if (state.pointerDownTime) {
+            domNode.durationMs = parseFloat(
+              (performance.now() - state.pointerDownTime).toFixed(3)
+            );
+          }
         }
       });
 
@@ -1067,6 +1092,23 @@
                       { name: 'event processing: ' + procTime + 'ms', durationMs: procTime, children: [] },
                       { name: 'first-rAF (latency)', durationMs: latency, children: [] }
                     );
+                    // Add DOM mutations recorded during this interaction
+                    var dm = state.currentDOMMutations;
+                    if (dm) {
+                      var totalDM = dm._childList + dm._attributes + dm._characters;
+                      if (totalDM > 0) {
+                        t.children.push({
+                          name: 'DOM mutations \u00d7' + totalDM +
+                            ' (nodes:' + dm._childList +
+                            ' attrs:' + dm._attributes +
+                            ' text:' + dm._characters + ')',
+                          durationMs: null,
+                          children: [],
+                          _isDOMNode: true,
+                        });
+                      }
+                    }
+                    state.currentDOMMutations = null;
                   });
 
                   state.callTrees = state.callTrees.concat(trees);
@@ -1494,6 +1536,7 @@
       state.latencySamples = []; state.memorySamples = []; state.callTrees = [];
       state.interactionCount = 0;
       state.lastCompletedTree = null;
+      state.currentDOMMutations = null;
       longTasks = [];
       state.currentTree = null; state.interactionCanvasCalls = []; state.isDrawing = false;
       Object.keys(state.canvasTimings).forEach(function (k) { state.canvasTimings[k] = []; });
