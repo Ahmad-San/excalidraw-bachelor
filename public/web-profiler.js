@@ -1059,26 +1059,30 @@
                 // Restart immediately for next interaction
                 startNativeProfiler();
 
+                var latency = meta.rafLatency !== null ? meta.rafLatency :
+                  Math.round(performance.now() - meta.downTime);
+
+                var trees = [];
+
                 if (trace && trace.samples.length) {
                   // No filter needed — profiler was restarted at previous pointerdown
                   // so all samples in this trace belong to this interaction
-                  var trees = nativeTraceToCallTrees(trace);
-                  var latency = meta.rafLatency !== null ? meta.rafLatency :
-                    Math.round(performance.now() - meta.downTime);
+                  trees = nativeTraceToCallTrees(trace);
+                }
 
-                  // Always create at least one tree node — even with no samples
-                  // so HUD always updates after every interaction
-                  if (!trees.length) {
-                    trees = [{
-                      name: 'interaction_native_' + meta.count,
-                      pointerType: meta.pointerType,
-                      startMs: meta.downTime,
-                      endMs: meta.downTime + latency,
-                      durationMs: latency,
-                      latencyMs: latency,
-                      children: [],
-                    }];
-                  }
+                // Always create at least one tree node — even with no samples
+                // so HUD always updates and numbering stays consistent
+                if (!trees.length) {
+                  trees = [{
+                    name: 'interaction_native_' + meta.count,
+                    pointerType: meta.pointerType,
+                    startMs: meta.downTime,
+                    endMs: meta.downTime + latency,
+                    durationMs: latency,
+                    latencyMs: latency,
+                    children: [],
+                  }];
+                }
 
                   trees.forEach(function(t) {
                     t.name = 'interaction_native_' + meta.count;
@@ -1119,9 +1123,8 @@
                   if (state.options.logToConsole) {
                     console.log('[WebProfiler] Native interaction_' + meta.count +
                       ': delay=' + delay + 'ms proc=' + procTime + 'ms samples=' +
-                      trace.samples.length);
+                      (trace ? trace.samples.length : 0));
                   }
-                }
               });
             });
           });
@@ -1245,7 +1248,7 @@
 
       return {
         name: 'interaction_native_' + (i + 1),
-        pointerType: 'pen',
+        pointerType: meta.pointerType,
         startMs: startMs,
         endMs: endMs,
         durationMs: parseFloat((endMs - startMs).toFixed(3)),
