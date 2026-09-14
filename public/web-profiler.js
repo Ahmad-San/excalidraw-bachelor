@@ -1086,6 +1086,7 @@
 
                 trees.forEach(function(t) {
                   t.name = 'interaction_native_' + meta.count;
+                  t.pointerType = meta.pointerType;
                   t.latencyMs = latency;
                   t.startMs = meta.downTime;
                   t.endMs = meta.downTime + latency;
@@ -1244,13 +1245,13 @@
 
       return {
         name: 'interaction_native_' + (i + 1),
-        pointerType: meta.pointerType,
+        pointerType: 'unknown',
         startMs: startMs,
         endMs: endMs,
         durationMs: parseFloat((endMs - startMs).toFixed(3)),
         latencyMs: null,
         children: children,
-        source: 'native', // mark as native profiler data
+        source: 'native',
       };
     });
   }
